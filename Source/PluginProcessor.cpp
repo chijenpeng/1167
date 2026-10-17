@@ -1,0 +1,241 @@
+#include "PluginProcessor.h"
+#include "PluginEditor.h"
+
+using urei1176::Range;
+
+//==============================================================================
+juce::String ParamText::dial (float rotation)
+{
+    const float marking = urei1176::dialMarking (rotation);
+    if (std::isinf (marking))
+        return juce::String::fromUTF8 (urei1176::kDialLabels[0].text);
+
+    // A printed label shows as printed ("24"); anything between them with one decimal ("21.0").
+    const juce::String text (marking, 1);
+    for (const auto& label : urei1176::kDialLabels)
+        if (text == juce::String (label.text) + ".0")
+            return label.text;
+    return text;
+}
+
+std::optional<float> ParamText::rotationForDialText (const juce::String& text)
+{
+    const auto t = text.trim().toLowerCase();
+    if (t.startsWith ("inf") || t.startsWith (juce::String::fromUTF8 (urei1176::kDialLabels[0].text)))
+        return 0.0f;
+    if (! t.containsAnyOf ("0123456789"))
+        return std::nullopt;
+
+    // dialMarking() falls monotonically from just past infinity (rotation 0) to 0 (rotation 1):
+    // invert it by bisection so that typed text and displayed text agree everywhere.
+    const float marking = t.retainCharacters ("0123456789.").getFloatValue();
+    float lo = 0.0f, hi = 1.0f;
+    for (int i = 0; i < 40; ++i)
+    {
+        const float mid = 0.5f * (lo + hi);
+        (urei1176::dialMarking (mid) > marking ? lo : hi) = mid;
+    }
+    const float rotation = hi;
+    for (const auto& label : urei1176::kDialLabels)
+        if (std::abs (rotation - label.rotation) < 1.0e-4f)
+            return label.rotation;
+    return rotation < 1.0e-4f ? 0.0f : rotation;
+}
+
+juce::String ParamText::attack (float value)
+{
+    return AttackLaw::isOff (value) ? juce::String ("OFF") : juce::String (value, 1);
+}
+
+namespace
+{
+    std::optional<float> attackForText (const juce::String& text)
+    {
+        const auto t = text.trim().toLowerCase();
+        if (t.startsWith ("off"))
+            return 0.0f;
+        if (! t.containsAnyOf ("0123456789"))
+            return std::nullopt;
+        return AttackLaw::snap (t.getFloatValue());
+    }
+}
+
+//==============================================================================
+float AttackLaw::fromNormalised (float n) noexcept
+{
+    if (n < kOffSpan)
+        return 0.0f;
+    return Range::attackMin + (Range::attackMax - Range::attackMin) * juce::jmin (1.0f, (n - kOffSpan) / (1.0f - kOffSpan));
+}
+
+float AttackLaw::toNormalised (float value) noexcept
+{
+    if (isOff (value))
+        return 0.0f;
+    return kOffSpan + (1.0f - kOffSpan) * (juce::jmin (value, Range::attackMax) - Range::attackMin) / (Range::attackMax - Range::attackMin);
+}
+
+float AttackLaw::snap (float value) noexcept
+{
+    return isOff (value) ? 0.0f : juce::jmin (value, Range::attackMax);
+}
+
+//==============================================================================
+juce::AudioProcessorValueTreeState::ParameterLayout Urei1176Processor::createLayout()
+{
+    using Float = juce::AudioParameterFloat;
+    using Choice = juce::AudioParameterChoice;
+    using Attributes = juce::AudioParameterFloatAttributes;
+
+    juce::AudioProcessorValueTreeState::ParameterLayout layout;
+
+    // Input and Output: knob rotation 0..1, shown as the printed dial.
+    const auto dial = [] (float fallback)
+    {
+        return Attributes().withStringFromValueFunction ([] (float v, int) { return ParamText::dial (v); })
+                           .withValueFromStringFunction ([fallback] (const juce::String& t)
+                                                         { return ParamText::rotationForDialText (t).value_or (fallback); });
+    };
+    layout.add (std::make_unique<Float> (juce::ParameterID { ParamID::input, 1 }, "Input",
+                                         juce::NormalisableRange<float> (Range::inputMin, Range::inputMax),
+                                         Range::inputDefault, dial (Range::inputDefault)));
+    layout.add (std::make_unique<Float> (juce::ParameterID { ParamID::output, 1 }, "Output",
+                                         juce::NormalisableRange<float> (Range::outputMin, Range::outputMax),
+                                         Range::outputDefault, dial (Range::outputDefault)));
+
+    // Attack: 1..7, and the OFF click below 1 (see AttackLaw).
+    const juce::NormalisableRange<float> attackRange (0.0f, Range::attackMax,
+                                                      [] (float, float, float n) { return AttackLaw::fromNormalised (n); },
+                                                      [] (float, float, float v) { return AttackLaw::toNormalised (v); },
+                                                      [] (float, float, float v) { return AttackLaw::snap (v); });
+    layout.add (std::make_unique<Float> (juce::ParameterID { ParamID::attack, 1 }, "Attack", attackRange, Range::attackDefault,
+                                         Attributes().withStringFromValueFunction ([] (float v, int) { return ParamText::attack (v); })
+                                                     .withValueFromStringFunction ([] (const juce::String& t)
+                                                                                   { return attackForText (t).value_or (Range::attackDefault); })));
+
+    layout.add (std::make_unique<Float> (juce::ParameterID { ParamID::release, 1 }, "Release",
+                                         juce::NormalisableRange<float> (Range::releaseMin, Range::releaseMax), Range::releaseDefault,
+                                         Attributes().withStringFromValueFunction ([] (float v, int) { return juce::String (v, 1); })));
+
+    // In urei1176::Ratio's order; "None" is every button out.
+    layout.add (std::make_unique<Choice> (juce::ParameterID { ParamID::ratio, 1 }, "Ratio",
+                                          juce::StringArray { "4", "8", "12", "20", "All", "None" }, (int) urei1176::Ratio::r4));
+    // In urei1176::MeterMode's order.
+    layout.add (std::make_unique<Choice> (juce::ParameterID { ParamID::meter, 1 }, "Meter",
+                                          juce::StringArray { "Off", "GR", "+4", "+8" }, (int) urei1176::MeterMode::gainReduction));
+
+    layout.add (std::make_unique<Float> (juce::ParameterID { ParamID::calibration, 1 }, "0 dBFS",
+                                         juce::NormalisableRange<float> (Range::calibrationMin, Range::calibrationMax, 1.0f),
+                                         Range::calibrationDefault,
+                                         Attributes().withLabel ("dBu")
+                                                     .withStringFromValueFunction ([] (float v, int) { return juce::String (juce::roundToInt (v)) + " dBu"; })));
+
+    return layout;
+}
+
+Urei1176Processor::Urei1176Processor()
+    : AudioProcessor (BusesProperties().withInput ("Input", juce::AudioChannelSet::stereo(), true)
+                                       .withOutput ("Output", juce::AudioChannelSet::stereo(), true)),
+      apvts (*this, nullptr, "Urei1176", createLayout()),
+      input (apvts.getRawParameterValue (ParamID::input)),
+      output (apvts.getRawParameterValue (ParamID::output)),
+      attack (apvts.getRawParameterValue (ParamID::attack)),
+      release (apvts.getRawParameterValue (ParamID::release)),
+      ratio (apvts.getRawParameterValue (ParamID::ratio)),
+      meter (apvts.getRawParameterValue (ParamID::meter)),
+      calibration (apvts.getRawParameterValue (ParamID::calibration))
+{
+}
+
+bool Urei1176Processor::isBusesLayoutSupported (const BusesLayout& layouts) const
+{
+    const auto out = layouts.getMainOutputChannelSet();
+    return (out == juce::AudioChannelSet::mono() || out == juce::AudioChannelSet::stereo())
+           && out == layouts.getMainInputChannelSet();
+}
+
+void Urei1176Processor::pushControls (urei1176::Channel& channel) const noexcept
+{
+    // The setters only store targets; the model moves its pots towards them itself.
+    const float attackValue = attack->load (std::memory_order_relaxed);
+    const bool limitOff = AttackLaw::isOff (attackValue);
+
+    channel.setInput (input->load (std::memory_order_relaxed));
+    channel.setOutput (output->load (std::memory_order_relaxed));
+    channel.setLimitOff (limitOff);
+    channel.setAttack (limitOff ? Range::attackMin : attackValue);   // the pot sits at 1 when clicked off
+    channel.setRelease (release->load (std::memory_order_relaxed));
+    channel.setRatio ((urei1176::Ratio) juce::jlimit (0, 5, juce::roundToInt (ratio->load (std::memory_order_relaxed))));
+    channel.setMeterMode ((urei1176::MeterMode) juce::jlimit (0, 3, juce::roundToInt (meter->load (std::memory_order_relaxed))));
+    channel.setCalibrationDbu (calibration->load (std::memory_order_relaxed));
+}
+
+void Urei1176Processor::prepareToPlay (double sampleRate, int)
+{
+    // prepare() builds the circuit and settles its operating point with the controls as they
+    // are now (it allocates, which is fine here and nowhere else).
+    for (auto& channel : channels)
+    {
+        pushControls (channel);
+        channel.prepare (sampleRate);
+    }
+
+    runningChannels.store (juce::jmin (getTotalNumInputChannels(), getTotalNumOutputChannels(), kMaxChannels));
+    setLatencySamples (0);
+}
+
+void Urei1176Processor::processBlock (juce::AudioBuffer<float>& buffer, juce::MidiBuffer&)
+{
+    juce::ScopedNoDenormals noDenormals;
+
+    const int numSamples = buffer.getNumSamples();
+    for (int ch = getTotalNumInputChannels(); ch < getTotalNumOutputChannels(); ++ch)
+        buffer.clear (ch, 0, numSamples);
+
+    // Dual mono: each channel is a complete unit with its own side chain (no 1176SA link).
+    const int numChannels = juce::jmin (getTotalNumInputChannels(), getTotalNumOutputChannels(), kMaxChannels);
+    for (int ch = 0; ch < numChannels; ++ch)
+    {
+        auto& channel = channels[(size_t) ch];
+        pushControls (channel);
+        channel.process (buffer.getWritePointer (ch), numSamples);
+    }
+
+    runningChannels.store (numChannels, std::memory_order_relaxed);
+}
+
+Urei1176Processor::Meters Urei1176Processor::getMeters() const noexcept
+{
+    Meters meters;
+    meters.channels = juce::jlimit (1, kMaxChannels, runningChannels.load (std::memory_order_relaxed));
+    for (int ch = 0; ch < meters.channels; ++ch)
+    {
+        meters.needleDb[(size_t) ch] = channels[(size_t) ch].getMeterNeedleDb();
+        meters.gainReductionDb[(size_t) ch] = channels[(size_t) ch].getGainReductionDb();
+    }
+    return meters;
+}
+
+//==============================================================================
+void Urei1176Processor::getStateInformation (juce::MemoryBlock& destData)
+{
+    if (const auto xml = apvts.copyState().createXml())
+        copyXmlToBinary (*xml, destData);
+}
+
+void Urei1176Processor::setStateInformation (const void* data, int sizeInBytes)
+{
+    const auto xml = getXmlFromBinary (data, sizeInBytes);
+    if (xml != nullptr && xml->hasTagName (apvts.state.getType()))
+        apvts.replaceState (juce::ValueTree::fromXml (*xml));
+}
+
+juce::AudioProcessorEditor* Urei1176Processor::createEditor()
+{
+    return new Urei1176Editor (*this);
+}
+
+juce::AudioProcessor* JUCE_CALLTYPE createPluginFilter()
+{
+    return new Urei1176Processor();
+}
