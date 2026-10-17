@@ -1,7 +1,8 @@
 # 1167
 
 Inspired by the UREI 1176LN, revision F.<br>
-Part of our legacy collection: recreations built from schematics where available, with extremely high CPU use in the heaviest models. They're legacy now, but we still think they sound pretty great.
+Part of the codycodie legacy release collection. Its component-level circuit model has very high
+CPU use, especially at higher sample rates.
 
 1167 is a schematic-derived AU and VST3 compressor model. Its signal path, side chain, gain-reduction FET, discrete line amplifier, transformers, meter behaviour, and front-panel control laws follow the documented revision F circuit. The model solves the component network rather than approximating it with a conventional compressor transfer curve. Its heaviest processing uses a large nonlinear circuit solver and can consume most of one CPU core per stereo instance, especially at higher sample rates.
 
