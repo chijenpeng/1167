@@ -597,7 +597,13 @@ int main (int argc, char** argv)
         { "rates", sampleRates }, { "hot", hotInput }, { "idle", idleMeter }, { "vu", vuBallistics }, { "rt", realtimeSafety },
         { "perf", performance },
     };
-    std::setvbuf (stdout, nullptr, _IOLBF, 0);
+    // MSVC's _IOLBF validates the buffer size as 2..INT_MAX even when buffer is null, so 0
+    // invokes the invalid-parameter handler and fast-fails before the first test output.
+    if (std::setvbuf (stdout, nullptr, _IONBF, 0) != 0)
+    {
+        std::fprintf (stderr, "failed to disable stdout buffering\n");
+        return 1;
+    }
     std::printf ("UREI 1176LN channel tests\n");
     for (const auto& sec : sections)
     {
