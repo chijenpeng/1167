@@ -70,6 +70,17 @@ jobs:
           New-Item -ItemType Directory -Force -Path $packageRoot, $licenses, $vst3Licenses | Out-Null
           Copy-Item -LiteralPath $plugin -Destination (Join-Path $packageRoot "1167.vst3") -Recurse
           Copy-Item -LiteralPath README.md -Destination $packageRoot
+          Copy-Item -LiteralPath THIRD_PARTY_NOTICES.md -Destination $packageRoot
+          @(
+            "1167 $version - Windows x64 VST3"
+            ""
+            "Copy 1167.vst3 to C:\Program Files\Common Files\VST3\ (administrator rights are"
+            "required) or to a VST3 folder your host scans, then rescan plug-ins in your host."
+            "Requires the Microsoft Visual C++ x64 Redistributable."
+            "The plug-in is unsigned, so Windows may show a warning for the downloaded ZIP."
+            "See README.md for the controls, THIRD_PARTY_NOTICES.md and licenses/ for dependency"
+            "notices and BUILD-INFO.txt for build provenance."
+          ) | Set-Content -LiteralPath (Join-Path $packageRoot "INSTALL.txt") -Encoding utf8
           Copy-Item -LiteralPath Resources/fonts/Inter-LICENSE.txt -Destination $licenses
           Copy-Item -LiteralPath Resources/fonts/JetBrainsMono-LICENSE.txt -Destination $licenses
           $juce = Join-Path $env:RUNNER_TEMP "deps/juce-src"
