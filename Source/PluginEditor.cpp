@@ -37,15 +37,15 @@ namespace
 
     // Spacing grammar of an option row: sibling options closest, the label further from its
     // first option.
-    constexpr int kOptionGap = 10, kLabelGap = 18, kRowHeight = 18;
+    constexpr int kOptionGap = 10, kLabelGap = 18, kRowHeight = 18, kRowGap = 2;
 
-    const juce::Identifier helpId ("help"), helpTitleId ("helpTitle"), editorScaleId ("editorScale");
+    const juce::Identifier helpId ("help"), helpTitleId ("helpTitle"), editorScaleId ("editorScale"), dimmedId ("dimmed");
 
     constexpr auto kDefaultHelpTitle = "1167";
     constexpr auto kDefaultHelp =
         "1167 is an independent model inspired by the UREI 1176LN revision F (blackface). In stereo it runs "
-        "two independent channels with no link between them. Hover over a control to see what it does; "
-        "double-click a knob for its default, or its value to type one.";
+        "two units: independent, tied as with the 1176SA adapter, or on mid and side. Hover over a control to see "
+        "what it does; double-click a knob for its default, or its value to type one.";
 
     void setHelp (juce::Component& c, const juce::String& title, const juce::String& help)
     {
@@ -73,7 +73,9 @@ void FlatLookAndFeel::drawRotarySlider (juce::Graphics& g, int x, int y, int wid
     const float angle = startAngle + position * (endAngle - startAngle);
     const float dot = juce::jmax (2.5f, radius * 0.11f);
 
-    g.setColour (slider.isMouseOverOrDragging() ? Theme::pale.brighter (0.1f) : Theme::pale);
+    // A knob whose parameter has no effect at the moment (Attack while the limiter is switched off) is drawn at 45 %: it still turns.
+    const float alpha = slider.getProperties().getWithDefault (dimmedId, false) ? 0.45f : 1.0f;
+    g.setColour ((slider.isMouseOverOrDragging() ? Theme::pale.brighter (0.1f) : Theme::pale).withMultipliedAlpha (alpha));
     g.fillEllipse (juce::Rectangle<float> (radius * 2.0f, radius * 2.0f).withCentre (centre));
 
     g.setColour (Theme::background);
@@ -92,12 +94,54 @@ void FlatLookAndFeel::drawCornerResizer (juce::Graphics& g, int w, int h, bool i
 //==============================================================================
 Knob::Knob (juce::AudioProcessorValueTreeState& state, const char* paramId, const juce::String& nameToUse, const juce::String& help,
             int diameterToUse, float sweepDegrees)
-    : name (nameToUse.toUpperCase()), diameter (diameterToUse), attachment (*state.getParameter (paramId), slider)
+    : Knob (state, paramId, nameToUse, help, diameterToUse, sweepDegrees, false)
+{
+}
+
+std::unique_ptr<Knob> Knob::makeAttackKnob (juce::AudioProcessorValueTreeState& state, const juce::String& help, int diameter)
+{
+    return std::unique_ptr<Knob> (new Knob (state, ParamID::attack, "Attack", help, diameter, 270.0f, true));
+}
+
+Knob::Knob (juce::AudioProcessorValueTreeState& state, const char* paramId, const juce::String& nameToUse, const juce::String& help,
+            int diameterToUse, float sweepDegrees, bool dialOnlyToUse)
+    : name (nameToUse.toUpperCase()), diameter (diameterToUse), dialOnly (dialOnlyToUse)
 {
     const float halfSweep = juce::degreesToRadians (sweepDegrees * 0.5f), twoPi = juce::MathConstants<float>::twoPi;
     slider.setRotaryParameters (twoPi - halfSweep, twoPi + halfSweep, true);
     slider.setVelocityModeParameters (0.15, 1, 0.0, true, juce::ModifierKeys::shiftModifier);   // Shift: fine
-    slider.onValueChange = [this] { repaint(); };
+
+    if (dialOnly)
+    {
+        // The dial's own range, 1 to 7: the parameter's OFF stretch below it is not on this knob.
+        auto& param = *state.getParameter (paramId);
+        slider.setRange (urei1176::Range::attackMin, urei1176::Range::attackMax, 0.0);
+        slider.setDoubleClickReturnValue (true, urei1176::Range::attackDefault);
+        slider.textFromValueFunction = [] (double v) { return ParamText::attack ((float) v); };
+        slider.valueFromTextFunction = [] (const juce::String& t)
+        {
+            return (double) juce::jlimit (urei1176::Range::attackMin, urei1176::Range::attackMax, t.getFloatValue());
+        };
+        dialAttachment = std::make_unique<juce::ParameterAttachment> (param, [this] (float v)
+        {
+            slider.setValue (juce::jmax (urei1176::Range::attackMin, v), juce::dontSendNotification);
+            repaint();
+        });
+        slider.onDragStart = [this] { dragging = true; dialAttachment->beginGesture(); };
+        slider.onDragEnd = [this] { dragging = false; dialAttachment->endGesture(); };
+        slider.onValueChange = [this]
+        {
+            if (dragging) dialAttachment->setValueAsPartOfGesture ((float) slider.getValue());
+            else dialAttachment->setValueAsCompleteGesture ((float) slider.getValue());
+            repaint();
+        };
+        dialAttachment->sendInitialUpdate();
+    }
+    else
+    {
+        attachment = std::make_unique<juce::SliderParameterAttachment> (*state.getParameter (paramId), slider);
+        slider.onValueChange = [this] { repaint(); };
+    }
     addAndMakeVisible (slider);
 
     editor.setJustification (juce::Justification::centred);
@@ -116,6 +160,16 @@ Knob::Knob (juce::AudioProcessorValueTreeState& state, const char* paramId, cons
     setHelp (*this, name, help);
 }
 
+void Knob::setDimmed (bool shouldDim)
+{
+    if (dimmed == shouldDim)
+        return;
+    dimmed = shouldDim;
+    slider.getProperties().set (dimmedId, dimmed);
+    slider.repaint();
+    repaint();
+}
+
 void Knob::resized()
 {
     auto area = getLocalBounds();
@@ -128,7 +182,8 @@ void Knob::paint (juce::Graphics& g)
 {
     auto area = getLocalBounds();
 
-    g.setColour (Theme::label);
+    const auto textColour = Theme::label.withMultipliedAlpha (dimmed ? 0.6f : 1.0f);
+    g.setColour (textColour);
     g.setFont (Theme::labelFont());
     g.drawText (name, area.removeFromTop (kLabelHeight), juce::Justification::centred, false);
 
@@ -136,6 +191,7 @@ void Knob::paint (juce::Graphics& g)
     const auto value = slider.getTextFromValue (slider.getValue());
     const bool infinity = value == juce::String::fromUTF8 (urei1176::kDialLabels[0].text);
     g.setFont (infinity ? Theme::bodyFont (14.0f) : Theme::valueFont (12.0f));
+    g.setColour (textColour);
     g.drawText (value, area.removeFromBottom (kLabelHeight), juce::Justification::centred, false);
 }
 
@@ -159,8 +215,9 @@ void Knob::finishEditing (bool apply)
     const auto text = editor.getText().trim().toLowerCase();
 
     // Only text that names a value: the parameters fall back to their defaults otherwise.
-    const bool meaningful = text.containsAnyOf ("0123456789") || text.startsWith ("off") || text.startsWith ("inf")
-                            || text.startsWith (juce::String::fromUTF8 (urei1176::kDialLabels[0].text));
+    const bool meaningful = text.containsAnyOf ("0123456789")
+                            || (! dialOnly && (text.startsWith ("off") || text.startsWith ("inf")
+                                               || text.startsWith (juce::String::fromUTF8 (urei1176::kDialLabels[0].text))));
     if (apply && meaningful)
         slider.setValue (slider.getValueFromText (text), juce::sendNotificationSync);
     repaint();
@@ -243,6 +300,83 @@ void OptionRow::mouseMove (const juce::MouseEvent& e)   { hovered = optionAt (e.
 void OptionRow::mouseExit (const juce::MouseEvent&)     { hovered = -1; repaint(); }
 
 //==============================================================================
+AttackOffSwitch::AttackOffSwitch (juce::AudioProcessorValueTreeState& state)
+    : offAttachment (*state.getParameter (ParamID::attackOff), [this] (float v) { switchOn = v >= 0.5f; changed(); }),
+      // the attack parameter's own OFF stretch (old sessions, automation) lights the switch too
+      attackAttachment (*state.getParameter (ParamID::attack), [this] (float v) { inOffSpan = AttackLaw::isOff (v); changed(); })
+{
+    offAttachment.sendInitialUpdate();
+    attackAttachment.sendInitialUpdate();
+    setHelp (*this, "Attack off",
+             "Switches limiting off: the side chain is cut and the unit does not limit, while the audio still runs through its amplifiers and "
+             "transformers. On the hardware this is the Attack knob's OFF position; here the knob keeps its setting and comes back when you "
+             "click this again.");
+}
+
+void AttackOffSwitch::changed()
+{
+    repaint();
+    if (wasLit != isLit())
+    {
+        wasLit = isLit();
+        if (onLitChanged)
+            onLitChanged (wasLit);
+    }
+}
+
+int AttackOffSwitch::labelTextWidth() const
+{
+    return Theme::widthOf (Theme::labelFont(), "ATTACK");
+}
+
+juce::Rectangle<int> AttackOffSwitch::optionRange() const
+{
+    return { labelColumn, 0, Theme::widthOf (Theme::labelFont(), "OFF"), getHeight() };
+}
+
+int AttackOffSwitch::preferredWidth() const
+{
+    return optionRange().getRight();
+}
+
+void AttackOffSwitch::paint (juce::Graphics& g)
+{
+    g.setFont (Theme::labelFont());
+    g.setColour (Theme::label);
+    g.drawText ("ATTACK", 0, 0, labelColumn, getHeight(), juce::Justification::centredLeft, false);
+    g.setColour (isLit() ? Theme::pale : (hovered ? Theme::text : Theme::label.withAlpha (0.7f)));
+    g.drawText ("OFF", optionRange().withWidth (optionRange().getWidth() + 4), juce::Justification::centredLeft, false);
+}
+
+void AttackOffSwitch::mouseDown (const juce::MouseEvent& e)
+{
+    if (! optionRange().expanded (kOptionGap / 2, 0).contains (e.getPosition()))
+        return;
+
+    if (isLit())
+    {
+        // Release it: the switch, and the parameter's own OFF stretch, if that is what lit it (the pot goes back to 1).
+        if (inOffSpan)
+            attackAttachment.setValueAsCompleteGesture (urei1176::Range::attackMin);
+        offAttachment.setValueAsCompleteGesture (0.0f);
+    }
+    else
+        offAttachment.setValueAsCompleteGesture (1.0f);
+}
+
+void AttackOffSwitch::mouseMove (const juce::MouseEvent& e)
+{
+    const bool over = optionRange().expanded (kOptionGap / 2, 0).contains (e.getPosition());
+    if (over != hovered)
+    {
+        hovered = over;
+        repaint();
+    }
+}
+
+void AttackOffSwitch::mouseExit (const juce::MouseEvent&)   { hovered = false; repaint(); }
+
+//==============================================================================
 namespace
 {
     // The VU scale: deflection is proportional to the rectified voltage, +3 VU at full scale.
@@ -258,7 +392,7 @@ VuMeter::VuMeter()
     setHelp (*this, "Meter",
              "A VU movement (300 ms to settle), as on the hardware. On GR it reads the control voltage: it rests at 0, "
              "falls to the left and over-reads fast peaks as the real meter does. Bottom left: the gain cell's actual "
-             "reduction (the larger of the two channels), without the meter's ballistics.");
+             "reduction (the larger of the two units), without the meter's ballistics. In M/S it gives M and S separately.");
 }
 
 float VuMeter::angleFor (float db) noexcept
@@ -290,6 +424,18 @@ void VuMeter::setReading (float newNeedleDb, float newGrDb, urei1176::MeterMode 
         needleDb = newNeedleDb;
         grDb = newGrDb;
         mode = newMode;
+        repaint();
+    }
+}
+
+void VuMeter::setMidSide (bool on, float midDb, float sideDb)
+{
+    const bool changedReadout = on && (juce::String (midDb, 1) != juce::String (midGrDb, 1) || juce::String (sideDb, 1) != juce::String (sideGrDb, 1));
+    if (on != midSide || changedReadout)
+    {
+        midSide = on;
+        midGrDb = midDb;
+        sideGrDb = sideDb;
         repaint();
     }
 }
@@ -340,14 +486,27 @@ void VuMeter::paint (juce::Graphics& g)
     g.drawText ("VU", juce::Rectangle<float> (faceArea.getX(), centre.y - r + 35.0f, faceArea.getWidth(), 12.0f),
                 juce::Justification::centred, false);
 
-    // The gain cell's reduction, as a number.
+    // The gain cell's reduction, as a number; in mid-side the two units' own, M and S.
     auto readout = hood.reduced (8.0f, 0.0f);
+    const auto reduction = [] (float db) { return (db >= 0.05f ? minusSign() : juce::String()) + juce::String (db, 1); };
     g.setColour (Theme::label);
     g.setFont (Theme::labelFont (8.0f));
-    g.drawText ("GR", readout.removeFromLeft (18.0f), juce::Justification::centredLeft, false);
-    g.setFont (Theme::valueFont (9.0f));
-    g.drawText ((grDb >= 0.05f ? minusSign() : juce::String()) + juce::String (grDb, 1) + " dB", readout,
-                juce::Justification::centredLeft, false);
+    if (midSide)
+    {
+        g.drawText ("M", readout.removeFromLeft (10.0f), juce::Justification::centredLeft, false);
+        g.setFont (Theme::valueFont (9.0f));
+        g.drawText (reduction (midGrDb), readout.removeFromLeft (38.0f), juce::Justification::centredLeft, false);
+        g.setFont (Theme::labelFont (8.0f));
+        g.drawText ("S", readout.removeFromLeft (10.0f), juce::Justification::centredLeft, false);
+        g.setFont (Theme::valueFont (9.0f));
+        g.drawText (reduction (sideGrDb) + " dB", readout, juce::Justification::centredLeft, false);
+    }
+    else
+    {
+        g.drawText ("GR", readout.removeFromLeft (18.0f), juce::Justification::centredLeft, false);
+        g.setFont (Theme::valueFont (9.0f));
+        g.drawText (reduction (grDb) + " dB", readout, juce::Justification::centredLeft, false);
+    }
 
     // The needle, from its pivot under the hood.
     juce::Graphics::ScopedSaveState state (g);
@@ -367,11 +526,6 @@ EditorView::EditorView (Urei1176Processor& p)
               "The level after the gain cell, into the output amplifier and transformer. It does not change how hard the "
               "unit limits; turned far up it drives the output amplifier into clipping, as on the hardware.",
               64, 320.0f),
-      attack (p.apvts, ParamID::attack, "Attack",
-              "How quickly it clamps down: 7 (fully clockwise) is the fastest, about 0.25 ms; 1 about 4 ms. Turn past 1 to "
-              "click it OFF: the side chain is cut and the unit does not limit, while the audio still runs through its "
-              "amplifiers and transformers.",
-              64),
       release (p.apvts, ParamID::release, "Release",
                "How quickly the gain recovers once the level drops: 7 (fully clockwise) is the fastest, about 90 ms; 1 about 1.3 s.",
                64),
@@ -380,6 +534,10 @@ EditorView::EditorView (Urei1176Processor& p)
                    "threshold is fixed in dBu, so a higher setting drives it less for the same track level. Input and Output "
                    "at 24 stay at about unity gain whatever this is.",
                    36),
+      attack (Knob::makeAttackKnob (p.apvts,
+              "How quickly it clamps down: 7 (fully clockwise) is the fastest, about 0.25 ms; 1 about 4 ms. To switch limiting off "
+              "use ATTACK OFF; the knob keeps its setting.",
+              64)),
       ratioRow (*p.apvts.getParameter (ParamID::ratio), "Ratio", { "4", "8", "12", "20", "All" },
                 "4 to 20: how hard it limits above the threshold, which rises with the ratio. ALL is every button pressed in at "
                 "once: the bias shifts and, on GR, the needle pins to the right at idle, as on a real unit. Click the lit "
@@ -388,11 +546,18 @@ EditorView::EditorView (Urei1176Processor& p)
       meterRow (*p.apvts.getParameter (ParamID::meter), "Meter", { "Off", "GR", "+4", "+8" },
                 "What the needle shows; it never changes the sound. GR: gain reduction, resting at 0 and falling to the left "
                 "(" + minusSign() + "10 is 10 dB). +4 / +8: output level, 0 VU = +4 or +8 dBu. OFF lets the needle rest (on the "
-                "hardware it switches the unit off). In stereo, GR shows the channel reducing more, +4 / +8 the louder one.")
+                "hardware it switches the unit off). In stereo, GR shows the unit reducing more, +4 / +8 the louder one."),
+      stereoRow (*p.apvts.getParameter (ParamID::stereo), "Stereo", { "Dual", "Link", "M/S" },
+                 "DUAL: two independent units. LINK: the two units' control nodes are tied as in UREI's 1176SA adapter, so both channels "
+                 "get the same gain reduction, set mostly by the louder one (derived from the circuit; the adapter's own values are not known). "
+                 "M/S: the units see mid and side, M = (L + R) / 2 and S = (L " + minusSign() + " R) / 2, and the meter reads M and S. "
+                 "Mono tracks ignore this."),
+      attackOff (p.apvts)
 {
     const std::pair<juce::Component*, const char*> controls[] {
-        { &input, ParamID::input }, { &output, ParamID::output }, { &attack, ParamID::attack }, { &release, ParamID::release },
-        { &calibration, ParamID::calibration }, { &ratioRow, ParamID::ratio }, { &meterRow, ParamID::meter }
+        { &input, ParamID::input }, { &output, ParamID::output }, { attack.get(), ParamID::attack }, { &release, ParamID::release },
+        { &calibration, ParamID::calibration }, { &ratioRow, ParamID::ratio }, { &meterRow, ParamID::meter },
+        { &stereoRow, ParamID::stereo }, { &attackOff, ParamID::attackOff }
     };
     for (const auto& [component, id] : controls)
     {
@@ -401,10 +566,16 @@ EditorView::EditorView (Urei1176Processor& p)
     }
     addAndMakeVisible (vu);
 
-    // The two rows share one label column, so their options start together.
-    const int column = juce::jmax (ratioRow.labelTextWidth(), meterRow.labelTextWidth()) + kLabelGap;
-    ratioRow.setLabelColumn (column);
-    meterRow.setLabelColumn (column);
+    // Two columns of two rows (Ratio over Stereo, Meter over Attack Off); the rows of a column share one label column, so their options
+    // start together.
+    const int leftColumn = juce::jmax (ratioRow.labelTextWidth(), stereoRow.labelTextWidth()) + kLabelGap;
+    const int rightColumn = juce::jmax (meterRow.labelTextWidth(), attackOff.labelTextWidth()) + kLabelGap;
+    ratioRow.setLabelColumn (leftColumn);
+    stereoRow.setLabelColumn (leftColumn);
+    meterRow.setLabelColumn (rightColumn);
+    attackOff.setLabelColumn (rightColumn);
+    attackOff.onLitChanged = [this] (bool lit) { attack->setDimmed (lit); };
+    attack->setDimmed (attackOff.isLit());
 
     showHelpFor (nullptr);
     updateMeters();
@@ -428,6 +599,13 @@ void EditorView::updateMeters()
     // The readout rises at once and falls at about 20 dB/s, so it can be read.
     shownGrDb = juce::jmax (gr, shownGrDb - 0.7f);
     vu.setReading (needle, shownGrDb, mode);
+
+    // In mid-side the readout gives the two units separately, M and S.
+    const bool midSide = juce::roundToInt (processor.apvts.getRawParameterValue (ParamID::stereo)->load()) == (int) urei1176::StereoMode::midSide
+                         && meters.channels == 2;
+    shownMidDb = juce::jmax (meters.gainReductionDb[0], shownMidDb - 0.7f);
+    shownSideDb = juce::jmax (meters.gainReductionDb[1], shownSideDb - 0.7f);
+    vu.setMidSide (midSide, shownMidDb, shownSideDb);
 }
 
 void EditorView::showHelpFor (juce::Component* component)
@@ -496,19 +674,27 @@ void EditorView::resized()
     area.removeFromBottom (10);
     helpArea = area.removeFromBottom (54);
 
-    // Ratio and meter share one compact lane above the knob bank. To the right sit a two-thirds
-    // size VU face and the calibration control; the help follows immediately below the unit.
+    // Four option rows in two columns form one compact lane above the knob bank: Ratio over Stereo, Meter over Attack Off. To the right sit
+    // a two-thirds size VU face and the calibration control; the help follows immediately below the unit.
     auto unit = area;
     auto knobArea = unit.removeFromLeft (4 * knobCell);
 
-    const int laneWidth = ratioRow.preferredWidth() + laneGap + meterRow.preferredWidth();
-    auto lane = juce::Rectangle<int> (knobArea.getCentreX() - laneWidth / 2, knobArea.getY(), laneWidth, kRowHeight);
-    ratioRow.setBounds (lane.removeFromLeft (ratioRow.preferredWidth()));
+    const int leftWidth = juce::jmax (ratioRow.preferredWidth(), stereoRow.preferredWidth());
+    const int rightWidth = juce::jmax (meterRow.preferredWidth(), attackOff.preferredWidth());
+    const int laneWidth = leftWidth + laneGap + rightWidth;
+    auto lane = juce::Rectangle<int> (knobArea.getCentreX() - laneWidth / 2, knobArea.getY(), laneWidth, 2 * kRowHeight + kRowGap);
+    auto left = lane.removeFromLeft (leftWidth);
     lane.removeFromLeft (laneGap);
-    meterRow.setBounds (lane.removeFromLeft (meterRow.preferredWidth()));
+    auto right = lane;
+    ratioRow.setBounds (left.removeFromTop (kRowHeight).withWidth (ratioRow.preferredWidth()));
+    left.removeFromTop (kRowGap);
+    stereoRow.setBounds (left.withWidth (stereoRow.preferredWidth()));
+    meterRow.setBounds (right.removeFromTop (kRowHeight).withWidth (meterRow.preferredWidth()));
+    right.removeFromTop (kRowGap);
+    attackOff.setBounds (right.withWidth (attackOff.preferredWidth()));
 
-    knobArea.removeFromTop (kRowHeight + laneToKnobs);
-    for (auto* knob : { &input, &output, &attack, &release })
+    knobArea.removeFromTop (2 * kRowHeight + kRowGap + laneToKnobs);
+    for (auto* knob : { &input, &output, attack.get(), &release })
         knob->setBounds (knobArea.removeFromLeft (knobCell).withSizeKeepingCentre (knobCell, knob->preferredHeight()));
 
     auto calibrationArea = unit.removeFromRight (calibrationColumn);

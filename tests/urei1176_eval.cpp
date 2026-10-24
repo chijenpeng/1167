@@ -1,6 +1,7 @@
-// Offline runner for one 1176LN channel.
+// Offline runner for one 1176LN channel: the circuit engine (urei1176::Channel), or with --fast the
+// reduced-circuit engine the plug-in uses (urei1176::FastChannel).
 //
-//   urei1176_eval [--wav in.wav] [--out out.wav] [--rate 48000] [--channel 0] [--block 512]
+//   urei1176_eval [--fast] [--wav in.wav] [--out out.wav] [--rate 48000] [--channel 0] [--block 512]
 //                 [--set name=value ...]
 //
 // Without --wav it runs a built-in test signal: 1 s of a 1 kHz tone at -30 dBFS, 1 s at -6 dBFS,
@@ -13,6 +14,7 @@
 // "d" prefix, e.g. input=d18), attack, release (dial 1..7), ratio (4, 8, 12, 20, all, none),
 // limitoff (0/1), meter (off, gr, +4, +8), cal (dBu at 0 dBFS, 10..26).
 
+#include "dsp/Fast1176.h"
 #include "dsp/Urei1176.h"
 
 #include <algorithm>
@@ -91,7 +93,8 @@ void writeFloatWav (const std::string& path, const std::vector<float>& data, int
 
 double db (double x) { return 20.0 * std::log10 (std::max (x, 1e-12)); }
 
-bool apply (urei1176::Channel& ch, const std::string& name, const std::string& value)
+template <class Ch>
+bool apply (Ch& ch, const std::string& name, const std::string& value)
 {
     using namespace urei1176;
     const float v = (float) std::atof (value.c_str());
@@ -125,55 +128,10 @@ bool apply (urei1176::Channel& ch, const std::string& name, const std::string& v
 }
 } // namespace
 
-int main (int argc, char** argv)
+template <class Ch>
+int runEngine (const std::vector<float>& x, double rate, int block, const std::string& outPath, const std::vector<std::pair<std::string, std::string>>& sets)
 {
-    std::string inPath, outPath;
-    double rate = 48000.0;
-    int channel = 0, block = 512;
-    std::vector<std::pair<std::string, std::string>> sets;
-    for (int i = 1; i < argc; ++i)
-    {
-        const std::string a = argv[i];
-        if (a == "--wav" && i + 1 < argc) inPath = argv[++i];
-        else if (a == "--out" && i + 1 < argc) outPath = argv[++i];
-        else if (a == "--rate" && i + 1 < argc) rate = std::atof (argv[++i]);
-        else if (a == "--channel" && i + 1 < argc) channel = std::atoi (argv[++i]);
-        else if (a == "--block" && i + 1 < argc) block = std::max (1, std::atoi (argv[++i]));
-        else if (a == "--set" && i + 1 < argc)
-        {
-            const std::string kv = argv[++i];
-            const auto eq = kv.find ('=');
-            if (eq == std::string::npos) { std::fprintf (stderr, "--set needs name=value\n"); return 1; }
-            sets.push_back ({ kv.substr (0, eq), kv.substr (eq + 1) });
-        }
-        else
-        {
-            std::fprintf (stderr, "usage: urei1176_eval [--wav in.wav] [--out out.wav] [--rate 48000] [--channel 0] [--block 512] [--set name=value ...]\n");
-            return 1;
-        }
-    }
-
-    std::vector<float> x;
-    if (! inPath.empty())
-    {
-        x = readWavChannel (inPath, rate, channel);
-        if (x.empty()) { std::fprintf (stderr, "cannot read %s (channel %d)\n", inPath.c_str(), channel); return 1; }
-        std::printf ("input %s: %.2f s at %.0f Hz, channel %d\n", inPath.c_str(), (double) x.size() / rate, rate, channel);
-    }
-    else
-    {
-        const int n = (int) (3.0 * rate);
-        x.resize ((size_t) n);
-        for (int i = 0; i < n; ++i)
-        {
-            const double t = i / rate;
-            const double level = (t >= 1.0 && t < 2.0) ? std::pow (10.0, -6.0 / 20.0) : std::pow (10.0, -30.0 / 20.0);
-            x[(size_t) i] = (float) (level * std::sin (2.0 * kPi * 1000.0 * t));
-        }
-        std::printf ("built-in signal: 1 kHz, 1 s at -30 dBFS, 1 s at -6 dBFS, 1 s at -30 dBFS, %.0f Hz\n", rate);
-    }
-
-    urei1176::Channel ch;
+    Ch ch;
     for (const auto& s : sets)
         if (! apply (ch, s.first, s.second)) { std::fprintf (stderr, "unknown setting %s=%s\n", s.first.c_str(), s.second.c_str()); return 1; }
     const auto t0 = std::chrono::steady_clock::now();
@@ -218,4 +176,57 @@ int main (int argc, char** argv)
         std::printf ("wrote %s\n", outPath.c_str());
     }
     return finite ? 0 : 1;
+}
+
+int main (int argc, char** argv)
+{
+    std::string inPath, outPath;
+    double rate = 48000.0;
+    int channel = 0, block = 512;
+    bool fast = false;
+    std::vector<std::pair<std::string, std::string>> sets;
+    for (int i = 1; i < argc; ++i)
+    {
+        const std::string a = argv[i];
+        if (a == "--wav" && i + 1 < argc) inPath = argv[++i];
+        else if (a == "--out" && i + 1 < argc) outPath = argv[++i];
+        else if (a == "--rate" && i + 1 < argc) rate = std::atof (argv[++i]);
+        else if (a == "--channel" && i + 1 < argc) channel = std::atoi (argv[++i]);
+        else if (a == "--block" && i + 1 < argc) block = std::max (1, std::atoi (argv[++i]));
+        else if (a == "--fast") fast = true;
+        else if (a == "--set" && i + 1 < argc)
+        {
+            const std::string kv = argv[++i];
+            const auto eq = kv.find ('=');
+            if (eq == std::string::npos) { std::fprintf (stderr, "--set needs name=value\n"); return 1; }
+            sets.push_back ({ kv.substr (0, eq), kv.substr (eq + 1) });
+        }
+        else
+        {
+            std::fprintf (stderr, "usage: urei1176_eval [--fast] [--wav in.wav] [--out out.wav] [--rate 48000] [--channel 0] [--block 512] [--set name=value ...]\n");
+            return 1;
+        }
+    }
+
+    std::vector<float> x;
+    if (! inPath.empty())
+    {
+        x = readWavChannel (inPath, rate, channel);
+        if (x.empty()) { std::fprintf (stderr, "cannot read %s (channel %d)\n", inPath.c_str(), channel); return 1; }
+        std::printf ("input %s: %.2f s at %.0f Hz, channel %d\n", inPath.c_str(), (double) x.size() / rate, rate, channel);
+    }
+    else
+    {
+        const int n = (int) (3.0 * rate);
+        x.resize ((size_t) n);
+        for (int i = 0; i < n; ++i)
+        {
+            const double t = i / rate;
+            const double level = (t >= 1.0 && t < 2.0) ? std::pow (10.0, -6.0 / 20.0) : std::pow (10.0, -30.0 / 20.0);
+            x[(size_t) i] = (float) (level * std::sin (2.0 * kPi * 1000.0 * t));
+        }
+        std::printf ("built-in signal: 1 kHz, 1 s at -30 dBFS, 1 s at -6 dBFS, 1 s at -30 dBFS, %.0f Hz\n", rate);
+    }
+
+    return fast ? runEngine<urei1176::FastChannel> (x, rate, block, outPath, sets) : runEngine<urei1176::Channel> (x, rate, block, outPath, sets);
 }

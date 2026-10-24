@@ -130,6 +130,11 @@ juce::AudioProcessorValueTreeState::ParameterLayout Urei1176Processor::createLay
                                          Attributes().withLabel ("dBu")
                                                      .withStringFromValueFunction ([] (float v, int) { return juce::String (juce::roundToInt (v)) + " dBu"; })));
 
+    // Appended after the first seven (never reordered): the stereo mode, in urei1176::StereoMode's order, and the Attack Off switch.
+    layout.add (std::make_unique<Choice> (juce::ParameterID { ParamID::stereo, 1 }, "Stereo",
+                                          juce::StringArray { "Dual", "Link", "M/S" }, (int) urei1176::StereoMode::dual));
+    layout.add (std::make_unique<juce::AudioParameterBool> (juce::ParameterID { ParamID::attackOff, 1 }, "Attack Off", false));
+
     return layout;
 }
 
@@ -143,7 +148,9 @@ Urei1176Processor::Urei1176Processor()
       release (apvts.getRawParameterValue (ParamID::release)),
       ratio (apvts.getRawParameterValue (ParamID::ratio)),
       meter (apvts.getRawParameterValue (ParamID::meter)),
-      calibration (apvts.getRawParameterValue (ParamID::calibration))
+      calibration (apvts.getRawParameterValue (ParamID::calibration)),
+      stereo (apvts.getRawParameterValue (ParamID::stereo)),
+      attackOff (apvts.getRawParameterValue (ParamID::attackOff))
 {
 }
 
@@ -154,11 +161,12 @@ bool Urei1176Processor::isBusesLayoutSupported (const BusesLayout& layouts) cons
            && out == layouts.getMainInputChannelSet();
 }
 
-void Urei1176Processor::pushControls (urei1176::Channel& channel) const noexcept
+void Urei1176Processor::pushControls (urei1176::FastChannel& channel) const noexcept
 {
     // The setters only store targets; the model moves its pots towards them itself.
     const float attackValue = attack->load (std::memory_order_relaxed);
-    const bool limitOff = AttackLaw::isOff (attackValue);
+    // Limiting is off with the Attack Off switch, or with the Attack parameter in its OFF span (old sessions and automation).
+    const bool limitOff = attackOff->load (std::memory_order_relaxed) >= 0.5f || AttackLaw::isOff (attackValue);
 
     channel.setInput (input->load (std::memory_order_relaxed));
     channel.setOutput (output->load (std::memory_order_relaxed));
@@ -168,6 +176,11 @@ void Urei1176Processor::pushControls (urei1176::Channel& channel) const noexcept
     channel.setRatio ((urei1176::Ratio) juce::jlimit (0, 5, juce::roundToInt (ratio->load (std::memory_order_relaxed))));
     channel.setMeterMode ((urei1176::MeterMode) juce::jlimit (0, 3, juce::roundToInt (meter->load (std::memory_order_relaxed))));
     channel.setCalibrationDbu (calibration->load (std::memory_order_relaxed));
+}
+
+urei1176::StereoMode Urei1176Processor::currentStereoMode() const noexcept
+{
+    return (urei1176::StereoMode) juce::jlimit (0, 2, juce::roundToInt (stereo->load (std::memory_order_relaxed)));
 }
 
 void Urei1176Processor::prepareToPlay (double sampleRate, int)
@@ -180,6 +193,8 @@ void Urei1176Processor::prepareToPlay (double sampleRate, int)
         channel.prepare (sampleRate);
     }
 
+    stereoRunner.prepare (sampleRate);
+    stereoRunner.snapTo (currentStereoMode());   // a mode set before playback starts needs no morph
     runningChannels.store (juce::jmin (getTotalNumInputChannels(), getTotalNumOutputChannels(), kMaxChannels));
     setLatencySamples (0);
 }
@@ -192,14 +207,23 @@ void Urei1176Processor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mi
     for (int ch = getTotalNumInputChannels(); ch < getTotalNumOutputChannels(); ++ch)
         buffer.clear (ch, 0, numSamples);
 
-    // Dual mono: each channel is a complete unit with its own side chain (no 1176SA link).
     const int numChannels = juce::jmin (getTotalNumInputChannels(), getTotalNumOutputChannels(), kMaxChannels);
-    for (int ch = 0; ch < numChannels; ++ch)
+    if (numChannels == 2)
     {
-        auto& channel = channels[(size_t) ch];
-        pushControls (channel);
-        channel.process (buffer.getWritePointer (ch), numSamples);
+        // Two units stepped together. Dual: each is a complete unit with its own side chain (bit for bit what it would give alone). Link: the
+        // 1176SA tie of their control nodes. M/S: the units see mid and side. Ratio, Attack and Release are shared, so both units always
+        // have the same settings.
+        pushControls (channels[0]);
+        pushControls (channels[1]);
+        stereoRunner.process (channels[0], channels[1], buffer.getWritePointer (0), buffer.getWritePointer (1), numSamples, currentStereoMode());
     }
+    else
+        for (int ch = 0; ch < numChannels; ++ch)
+        {
+            auto& channel = channels[(size_t) ch];
+            pushControls (channel);
+            channel.process (buffer.getWritePointer (ch), numSamples);
+        }
 
     runningChannels.store (numChannels, std::memory_order_relaxed);
 }
@@ -226,8 +250,28 @@ void Urei1176Processor::getStateInformation (juce::MemoryBlock& destData)
 void Urei1176Processor::setStateInformation (const void* data, int sizeInBytes)
 {
     const auto xml = getXmlFromBinary (data, sizeInBytes);
-    if (xml != nullptr && xml->hasTagName (apvts.state.getType()))
-        apvts.replaceState (juce::ValueTree::fromXml (*xml));
+    if (xml == nullptr || ! xml->hasTagName (apvts.state.getType()))
+        return;
+
+    const auto loaded = juce::ValueTree::fromXml (*xml);
+    const auto hasParameter = [&loaded] (const char* id) { return loaded.getChildWithProperty ("id", id).isValid(); };
+    const bool hadStereo = hasParameter (ParamID::stereo), hadAttackOff = hasParameter (ParamID::attackOff);
+    apvts.replaceState (loaded);
+
+    // replaceState leaves a parameter the state does not mention at its live value; a session saved before it existed must not inherit it.
+    // (Both are set explicitly in every case: a live instance in Link or M/S, or with the switch on, loads an older state as Dual and as the
+    // state says.)
+    if (! hadStereo)
+        apvts.getParameter (ParamID::stereo)->setValueNotifyingHost (apvts.getParameter (ParamID::stereo)->convertTo0to1 ((float) urei1176::StereoMode::dual));
+    if (! hadAttackOff)
+    {
+        // The OFF click of the earliest versions was the knob's bottom; the switch replaces it, and the knob sits at 1 as the hardware's pot does.
+        auto& attackParam = *apvts.getParameter (ParamID::attack);
+        const bool wasOff = AttackLaw::isOff (attackParam.convertFrom0to1 (attackParam.getValue()));
+        if (wasOff)
+            attackParam.setValueNotifyingHost (attackParam.convertTo0to1 (Range::attackMin));
+        apvts.getParameter (ParamID::attackOff)->setValueNotifyingHost (wasOff ? 1.0f : 0.0f);
+    }
 }
 
 juce::AudioProcessorEditor* Urei1176Processor::createEditor()

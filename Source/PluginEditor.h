@@ -27,6 +27,12 @@ public:
     /** `sweepDegrees`: the rotation from end to end, centred on 12 o'clock. */
     Knob (juce::AudioProcessorValueTreeState&, const char* paramId, const juce::String& name, const juce::String& help,
           int diameter, float sweepDegrees = 270.0f);
+    /** The Attack knob: the dial 1 to 7 only. Its parameter has a stretch below 1 that means OFF (AttackLaw), which the knob never enters:
+        dragging, the default and typed values stay on the dial, and a parameter value inside that stretch shows as 1. */
+    static std::unique_ptr<Knob> makeAttackKnob (juce::AudioProcessorValueTreeState&, const juce::String& help, int diameter);
+
+    /** Draws the knob quieter (it still turns): its parameter has no effect at the moment. */
+    void setDimmed (bool shouldDim);
 
     void paint (juce::Graphics&) override;
     void resized() override;
@@ -39,11 +45,16 @@ public:
 private:
     void finishEditing (bool apply);
 
+    Knob (juce::AudioProcessorValueTreeState&, const char* paramId, const juce::String& name, const juce::String& help,
+          int diameter, float sweepDegrees, bool dialOnly);
+
     juce::Slider slider { juce::Slider::RotaryHorizontalVerticalDrag, juce::Slider::NoTextBox };
     juce::String name;
     int diameter;
+    bool dialOnly, dragging = false, dimmed = false;
     juce::TextEditor editor;
-    juce::SliderParameterAttachment attachment;
+    std::unique_ptr<juce::SliderParameterAttachment> attachment;
+    std::unique_ptr<juce::ParameterAttachment> dialAttachment;   // the dial-only knob writes the parameter itself
 };
 
 /** "LABEL  OPTION  OPTION ..." as plain text; the selected option is lit. With `releasedIndex`
@@ -75,6 +86,34 @@ private:
     juce::ParameterAttachment attachment;
 };
 
+/** "ATTACK  OFF": the switch for the Attack Off parameter, in the option rows' grammar. OFF is lit while limiting is off, whether the switch is
+    on or the Attack parameter sits in its OFF span (an old session or automation); clicking it then releases both. */
+class AttackOffSwitch final : public juce::Component
+{
+public:
+    explicit AttackOffSwitch (juce::AudioProcessorValueTreeState&);
+
+    void paint (juce::Graphics&) override;
+    void mouseDown (const juce::MouseEvent&) override;
+    void mouseMove (const juce::MouseEvent&) override;
+    void mouseExit (const juce::MouseEvent&) override;
+
+    int labelTextWidth() const;
+    void setLabelColumn (int width) { labelColumn = width; repaint(); }
+    int preferredWidth() const;
+    bool isLit() const noexcept { return switchOn || inOffSpan; }
+    /** Called when lit changes (the editor dims the Attack knob). */
+    std::function<void (bool)> onLitChanged;
+
+private:
+    juce::Rectangle<int> optionRange() const;
+    void changed();
+
+    int labelColumn = 0;
+    bool switchOn = false, inOffSpan = false, hovered = false, wasLit = false;
+    juce::ParameterAttachment offAttachment, attackAttachment;
+};
+
 /** The VU meter as a flat scale: what the needle shows depends on the METER row. */
 class VuMeter final : public juce::Component
 {
@@ -84,6 +123,8 @@ public:
     /** The needle (dB on the VU scale), the gain cell's reduction (dB, >= 0) for the readout,
         and the meter mode. Repaints only when something visible changed. */
     void setReading (float needleDb, float gainReductionDb, urei1176::MeterMode mode);
+    /** Mid-side: the readout gives the two units' reductions, M and S, instead of one (the larger) figure. */
+    void setMidSide (bool on, float midDb, float sideDb);
     void paint (juce::Graphics&) override;
 
 private:
@@ -92,7 +133,8 @@ private:
     /** Angle (radians, clockwise from 12 o'clock) of a VU reading. */
     static float angleFor (float db) noexcept;
 
-    float needleDb = urei1176::Range::meterMinDb, grDb = 0.0f;
+    float needleDb = urei1176::Range::meterMinDb, grDb = 0.0f, midGrDb = 0.0f, sideGrDb = 0.0f;
+    bool midSide = false;
     urei1176::MeterMode mode = urei1176::MeterMode::gainReduction;
 };
 
@@ -100,7 +142,7 @@ private:
 class EditorView final : public juce::Component
 {
 public:
-    static constexpr int kWidth = 760, kHeight = 270;
+    static constexpr int kWidth = 760, kHeight = 286;
 
     explicit EditorView (Urei1176Processor&);
 
@@ -116,11 +158,13 @@ public:
 
 private:
     Urei1176Processor& processor;
-    Knob input, output, attack, release, calibration;
-    OptionRow ratioRow, meterRow;
+    Knob input, output, release, calibration;
+    std::unique_ptr<Knob> attack;
+    OptionRow ratioRow, meterRow, stereoRow;
+    AttackOffSwitch attackOff;
     VuMeter vu;
 
-    float shownGrDb = 0.0f;
+    float shownGrDb = 0.0f, shownMidDb = 0.0f, shownSideDb = 0.0f;
     juce::String helpTitle, helpText;
     juce::Rectangle<int> helpArea;
 };

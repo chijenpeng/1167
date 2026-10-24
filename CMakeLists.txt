@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.22)
 
-project(Plugin1167 VERSION 0.1.0 LANGUAGES C CXX)
+project(Plugin1167 VERSION 0.2.0 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -25,10 +25,18 @@ file(GLOB_RECURSE PLUGIN1167_DSP_SOURCES CONFIGURE_DEPENDS Source/dsp/*.cpp)
 add_library(plugin1167_dsp STATIC ${PLUGIN1167_DSP_SOURCES})
 target_include_directories(plugin1167_dsp PUBLIC Source)
 target_compile_options(plugin1167_dsp PRIVATE ${PLUGIN1167_COMPILER_OPTIONS})
+# The fast engine's hot loop: fused multiply-adds, no errno from the maths functions.
+if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
+    set_source_files_properties(Source/dsp/Fast1176.cpp PROPERTIES COMPILE_OPTIONS "-ffp-contract=on;-fno-math-errno")
+endif()
 
 add_executable(plugin1167_test tests/urei1176_test.cpp)
 target_link_libraries(plugin1167_test PRIVATE plugin1167_dsp)
 target_compile_options(plugin1167_test PRIVATE ${PLUGIN1167_COMPILER_OPTIONS})
+
+add_executable(plugin1167_stereo_test tests/urei1176_stereo_test.cpp)
+target_link_libraries(plugin1167_stereo_test PRIVATE plugin1167_dsp)
+target_compile_options(plugin1167_stereo_test PRIVATE ${PLUGIN1167_COMPILER_OPTIONS})
 
 add_executable(plugin1167_eval tests/urei1176_eval.cpp)
 target_link_libraries(plugin1167_eval PRIVATE plugin1167_dsp)
@@ -36,6 +44,8 @@ target_compile_options(plugin1167_eval PRIVATE ${PLUGIN1167_COMPILER_OPTIONS})
 
 enable_testing()
 add_test(NAME plugin1167_test COMMAND plugin1167_test)
+add_test(NAME plugin1167_test_fast COMMAND plugin1167_test --fast)
+add_test(NAME plugin1167_stereo_test COMMAND plugin1167_stereo_test)
 
 # ---------------------------------------------------------------------------------------------
 # PLUG-IN: the JUCE wrapper and editor around urei1176_dsp (two urei1176::Channel instances for

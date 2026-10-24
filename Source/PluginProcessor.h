@@ -1,5 +1,7 @@
 #pragma once
 
+#include "dsp/Fast1176.h"
+#include "dsp/StereoModes.h"
 #include "dsp/Urei1176.h"
 
 #include <juce_audio_utils/juce_audio_utils.h>
@@ -10,7 +12,8 @@
 namespace ParamID
 {
     inline constexpr auto input = "input", output = "output", attack = "attack", release = "release",
-                          ratio = "ratio", meter = "meter", calibration = "calibration";
+                          ratio = "ratio", meter = "meter", calibration = "calibration",
+                          stereo = "stereo", attackOff = "attackOff";   // appended after the first seven: never reorder
 }
 
 /** How the parameters map to the hardware's controls and print their values. Shared by the
@@ -27,9 +30,10 @@ namespace ParamText
     juce::String attack (float value);
 }
 
-/** The Attack parameter, 0..7: below 1 is the knob's OFF click (limiting off). Its normalised
-    range gives the click a short stretch of travel past 1 rather than a dead zone: 0 .. kAttackOffSpan
-    is OFF and everything above it is the dial's 1 .. 7 sweep. */
+/** The Attack parameter, 0..7: below 1 is an OFF span (limiting off) that the earliest versions of this plug-in reached by turning the knob
+    past 1; the editor's knob no longer enters it and the Attack Off switch (ParamID::attackOff) is the control now, but the span stays so
+    that old sessions and automation, and a host's generic editor, keep working. Its normalised range gives the span a short stretch of
+    travel past 1 rather than a dead zone: 0 .. kOffSpan is OFF and everything above it is the dial's 1 .. 7 sweep. */
 struct AttackLaw
 {
     static constexpr float kOffSpan = 0.06f;
@@ -81,13 +85,14 @@ public:
     /** Any thread: the latest needle and gain reduction of every running channel. */
     Meters getMeters() const noexcept;
     /** For tests: a channel's controls() show what the last processBlock() set. */
-    const urei1176::Channel& getChannel (int index) const noexcept { return channels[(size_t) index]; }
+    const urei1176::FastChannel& getChannel (int index) const noexcept { return channels[(size_t) index]; }
 
 private:
     static juce::AudioProcessorValueTreeState::ParameterLayout createLayout();
-    void pushControls (urei1176::Channel&) const noexcept;
+    void pushControls (urei1176::FastChannel&) const noexcept;
+    urei1176::StereoMode currentStereoMode() const noexcept;
 
-    std::array<urei1176::Channel, kMaxChannels> channels;
+    std::array<urei1176::FastChannel, kMaxChannels> channels;
     std::atomic<int> runningChannels { 0 };
 
     std::atomic<float>* const input;
@@ -97,6 +102,9 @@ private:
     std::atomic<float>* const ratio;
     std::atomic<float>* const meter;
     std::atomic<float>* const calibration;
+    std::atomic<float>* const stereo;
+    std::atomic<float>* const attackOff;
+    urei1176::StereoRunner stereoRunner;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (Urei1176Processor)
 };

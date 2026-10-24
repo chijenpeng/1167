@@ -4,11 +4,13 @@
 // failure.
 
 #include "dsp/Urei1176.h"
+#include "dsp/Fast1176.h"
 #include "dsp/Urei1176Circuit.h"
 
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <ctime>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -51,7 +53,15 @@ double fromDb (double d) { return std::pow (10.0, d / 20.0); }
 /** dBFS (sine peak) of a level in dBu at the default calibration. */
 double dbfsOf (double dbu, double cal = 18.0) { return dbu - cal; }
 
-using Setup = std::function<void (Channel&)>;
+
+/** UREI test 10 helper: moves R81 fully counter-clockwise and settles. */
+void diagSetBias (Channel& c, double pos) { c.circuitModel().setBiasPot (pos); c.reset(); }
+void diagSetBias (FastChannel& c, double pos) { c.setBiasPotDiag (pos); c.reset(); }
+
+template <class Ch>
+struct Tests
+{
+using Setup = std::function<void (Ch&)>;
 
 struct Run
 {
@@ -63,9 +73,9 @@ struct Run
 };
 
 /** Runs `input` (a function of time in seconds, floats) through a fresh channel. */
-Run run (double fs, double seconds, const std::function<double (double)>& input, const Setup& setup, int block = 32)
+static Run run (double fs, double seconds, const std::function<double (double)>& input, const Setup& setup, int block = 32)
 {
-    Channel ch;
+    Ch ch;
     setup (ch);
     ch.prepare (fs);
     const int n = (int) std::lround (seconds * fs);
@@ -84,14 +94,14 @@ Run run (double fs, double seconds, const std::function<double (double)>& input,
     return r;
 }
 
-double rmsOf (const std::vector<float>& v, size_t from, size_t to)
+static double rmsOf (const std::vector<float>& v, size_t from, size_t to)
 {
     double s = 0.0;
     for (size_t i = from; i < to; ++i) s += (double) v[i] * v[i];
     return std::sqrt (s / (double) std::max<size_t> (1, to - from));
 }
 
-std::function<double (double)> sine (double dbfs, double hz)
+static std::function<double (double)> sine (double dbfs, double hz)
 {
     const double a = fromDb (dbfs);
     return [a, hz] (double t) { return a * std::sin (2.0 * kPi * hz * t); };
@@ -99,7 +109,7 @@ std::function<double (double)> sine (double dbfs, double hz)
 
 /** Steady-state level (dB re 1.0 rms) and gain reduction (meter and gain cell) of a tone. */
 struct Steady { double outDb; double gr; double cell; bool finite; };
-Steady steady (double fs, double dbfs, double hz, const Setup& setup, double seconds = 1.5)
+static Steady steady (double fs, double dbfs, double hz, const Setup& setup, double seconds = 1.5)
 {
     const auto r = run (fs, seconds, sine (dbfs, hz), setup, 256);
     const size_t n = r.out.size(), from = n - (size_t) (0.25 * fs);
@@ -107,7 +117,7 @@ Steady steady (double fs, double dbfs, double hz, const Setup& setup, double sec
 }
 
 /** Amplitude of harmonic k of f0 by a DFT over a whole number of cycles. */
-double harmonic (const std::vector<float>& x, size_t from, size_t count, double fs, double f0, int k)
+static double harmonic (const std::vector<float>& x, size_t from, size_t count, double fs, double f0, int k)
 {
     double re = 0.0, im = 0.0;
     for (size_t i = 0; i < count; ++i)
@@ -121,7 +131,7 @@ double harmonic (const std::vector<float>& x, size_t from, size_t count, double 
 
 
 //==============================================================================================
-void operatingPoint()
+static void operatingPoint()
 {
     std::printf ("operating point: the netlist with the rev K drawing's values against the voltages marked on it (gyraf.dk redraw)\n");
     Channel ch;
@@ -199,7 +209,7 @@ void operatingPoint()
 /** Input level (dBFS) at which a 1 kHz tone gives `targetGr` dB of reduction (the gain cell's):
     a coarse search on 1.25 s tones, then a settled one on `settle` s tones (C5 via R7 + R9 and C2
     via R8 settle with ~1 s time constants; UREI's tests read settled levels). */
-double levelForReduction (double fs, double targetGr, const Setup& setup, double settle = 0.0)
+static double levelForReduction (double fs, double targetGr, const Setup& setup, double settle = 0.0)
 {
     double lo = -80.0, hi = 20.0;
     for (int i = 0; i < 12; ++i)
@@ -220,7 +230,7 @@ double levelForReduction (double fs, double targetGr, const Setup& setup, double
     return 0.5 * (lo + hi);
 }
 
-const char* ratioName (Ratio r)
+static const char* ratioName (Ratio r)
 {
     switch (r)
     {
@@ -230,14 +240,14 @@ const char* ratioName (Ratio r)
     return "?";
 }
 
-void ratioTest()
+static void ratioTest()
 {
     std::printf ("UREI factory test 11 (ratio): from 1 dB of limiting, +20 dB in; Input full, 1 kHz, settled (5 s tones)\n");
     constexpr double target[] { 5.0, 2.5, 1.66, 1.0 };
     for (int k = 0; k < 4; ++k)
     {
         const Ratio ratio = (Ratio) k;
-        const Setup setup = [ratio] (Channel& c) { c.setInput (Range::inputMax); c.setRatio (ratio); };
+        const Setup setup = [ratio] (Ch& c) { c.setInput (Range::inputMax); c.setRatio (ratio); };
         const double base = levelForReduction (48000.0, 1.0, setup, 5.0);
         const auto a = steady (48000.0, base, 1000.0, setup, 5.0), b = steady (48000.0, base + 20.0, 1000.0, setup, 5.0);
         const double rise = b.outDb - a.outDb;
@@ -249,14 +259,14 @@ void ratioTest()
 }
 
 /** Thresholds per ratio at the default settings: the input (dBFS) for 1 dB of reduction. */
-void thresholds()
+static void thresholds()
 {
     std::printf ("thresholds at the default settings (Input and Output at 24, calibration 18 dBu): 1 dB of reduction, 1 kHz, settled\n");
     double previous = -100.0;
     for (int k = 0; k < 5; ++k)
     {
         const Ratio ratio = (Ratio) k;
-        const Setup setup = [ratio] (Channel& c) { c.setRatio (ratio); };
+        const Setup setup = [ratio] (Ch& c) { c.setRatio (ratio); };
         const double t = levelForReduction (48000.0, 1.0, setup, 5.0);
         const auto out = steady (48000.0, t, 1000.0, setup, 5.0);
         char what[200];
@@ -268,14 +278,14 @@ void thresholds()
     }
 }
 
-void noReduction()
+static void noReduction()
 {
     std::printf ("ratio None and Attack OFF: no gain reduction\n");
     // 20 dB above the 4:1 threshold, Input full: deep reduction at 4:1 and All.
-    const double level = levelForReduction (48000.0, 1.0, [] (Channel& c) { c.setInput (Range::inputMax); c.setRatio (Ratio::r4); }) + 20.0;
+    const double level = levelForReduction (48000.0, 1.0, [] (Ch& c) { c.setInput (Range::inputMax); c.setRatio (Ratio::r4); }) + 20.0;
     auto at = [level] (Ratio ratio, bool off)
     {
-        return steady (48000.0, level, 1000.0, [ratio, off] (Channel& c) { c.setInput (Range::inputMax); c.setRatio (ratio); c.setLimitOff (off); });
+        return steady (48000.0, level, 1000.0, [ratio, off] (Ch& c) { c.setInput (Range::inputMax); c.setRatio (ratio); c.setLimitOff (off); });
     };
     const auto ref = at (Ratio::r4, false), all = at (Ratio::all, false), none = at (Ratio::none, false);
     const auto off4 = at (Ratio::r4, true), offAll = at (Ratio::all, true);
@@ -296,11 +306,11 @@ void noReduction()
     attack = onset to 63 % of the reduction reached 25 ms later; release = burst end to 63 % of
     the way back. The gate takes half of a fast control change at once and the rest over C5's
     ~1 s, so the attack is read on the fast part. */
-void timing()
+static void timing()
 {
     std::printf ("attack / release on a 1 kHz burst (Input full, 4:1, 10 dB above the 1 dB threshold; gain cell reduction)\n");
     const double fs = 96000.0;
-    const Setup base = [] (Channel& c) { c.setInput (Range::inputMax); c.setRatio (Ratio::r4); };
+    const Setup base = [] (Ch& c) { c.setInput (Range::inputMax); c.setRatio (Ratio::r4); };
     const double t1 = levelForReduction (48000.0, 1.0, base);
     const double quiet = t1 - 20.0, loud = t1 + 10.0;
     auto burst = [&] (double tOn, double tOff)
@@ -313,7 +323,7 @@ void timing()
     {
         const double tOn = 0.5, tOff = 1.0, total = 4.0;
         const int block = 2;
-        const auto r = run (fs, total, burst (tOn, tOff), [&] (Channel& c) { base (c); c.setAttack (attack); c.setRelease (release); }, block);
+        const auto r = run (fs, total, burst (tOn, tOff), [&] (Ch& c) { base (c); c.setAttack (attack); c.setRelease (release); }, block);
         const double dtBlock = block / fs;
         const size_t on = (size_t) (tOn / dtBlock), off = (size_t) (tOff / dtBlock), settle = on + (size_t) (0.025 / dtBlock);
         const double gr0 = r.cell[on - 1], grSettle = r.cell[settle], grEnd = r.cell[off - 1];
@@ -335,13 +345,13 @@ void timing()
     check (fast.releaseMs > 20.0 && fast.releaseMs < 300.0 && slow.releaseMs > 300.0 && slow.releaseMs < 5000.0, what);
 }
 
-void thd()
+static void thd()
 {
     std::printf ("THD at UREI's R16 setting point (5.3.5): 500 Hz, -30 dBu, Input full, Output at 18, Attack OFF, Release full, 20:1 (spec 0.5 %%)\n");
     const double fs = 96000.0, f0 = 500.0;
     auto measure = [&] (double dbu, bool limiting, double& gr)
     {
-        const Setup setup = [limiting] (Channel& c) {
+        const Setup setup = [limiting] (Ch& c) {
             c.setInput (Range::inputMax); c.setOutput (rotationForMarking (18.0f)); c.setRatio (Ratio::r20);
             c.setRelease (7.0f); c.setLimitOff (! limiting); };
         const auto r = run (fs, 3.0, sine (dbfsOf (dbu), f0), setup, 256);
@@ -360,7 +370,7 @@ void thd()
     // With limiting (the spec's "50 Hz to 15 kHz with limiting"): 500 Hz, 10 and 20 dB of reduction.
     for (double over : { 10.0, 20.0 })
     {
-        const double t = levelForReduction (48000.0, 1.0, [] (Channel& c) { c.setInput (Range::inputMax); c.setRatio (Ratio::r20); });
+        const double t = levelForReduction (48000.0, 1.0, [] (Ch& c) { c.setInput (Range::inputMax); c.setRatio (Ratio::r20); });
         const double withGr = measure (t + 18.0 + over, true, gr);
         std::snprintf (what, sizeof (what), "THD %.3f %% with %.1f dB of reduction (20:1, attack 4, release 7)", withGr, gr);
         check (withGr < 0.5, what);
@@ -368,7 +378,7 @@ void thd()
 }
 
 /** Gain (dB) from the plug-in's input to its output for a tone well below threshold. */
-double gainAt (double hz, const Setup& setup, double dbfs = -60.0)
+static double gainAt (double hz, const Setup& setup, double dbfs = -60.0)
 {
     const double fs = 96000.0;
     const double seconds = std::max (1.0, 40.0 / hz);
@@ -377,14 +387,14 @@ double gainAt (double hz, const Setup& setup, double dbfs = -60.0)
     return db (harmonic (r.out, from, count, fs, hz, 1) / fromDb (dbfs));
 }
 
-void unityGain()
+static void unityGain()
 {
     std::printf ("gain structure (below threshold, limiting on, 4:1)\n");
-    const double unity = gainAt (1000.0, [] (Channel&) {});
+    const double unity = gainAt (1000.0, [] (Ch&) {});
     char what[200];
     std::snprintf (what, sizeof (what), "Input and Output at 24 (UREI / UA: unity gain): %+.2f dB at 1 kHz", unity);
     check (std::abs (unity) < 1.0, what);
-    const double full = gainAt (2000.0, [] (Channel& c) { c.setInput (Range::inputMax); c.setOutput (Range::outputMax); }, -70.0);
+    const double full = gainAt (2000.0, [] (Ch& c) { c.setInput (Range::inputMax); c.setOutput (Range::outputMax); }, -70.0);
     std::snprintf (what, sizeof (what), "maximum gain (both full) %.1f dB at 2 kHz (rev H / UA: 45 +-1; rev F ~6 dB less per UREI's revision notes)", full);
     check (full > 37.0 && full < 41.0, what);
     // UREI factory test 8 window (+0.5 / -1 dB, 20 Hz - 20 kHz) at the unity setting.
@@ -392,7 +402,7 @@ void unityGain()
     std::string list;
     for (double hz : { 20.0, 50.0, 100.0, 5000.0, 10000.0, 15000.0, 20000.0 })
     {
-        const double g = gainAt (hz, [] (Channel&) {}) - unity;
+        const double g = gainAt (hz, [] (Ch&) {}) - unity;
         worstHi = std::max (worstHi, g);
         worstLo = std::min (worstLo, g);
         char item[40];
@@ -407,18 +417,17 @@ void unityGain()
 
 /** UREI test 10 on the model: limiting off, 20:1, release full; R81 sets Q1 to cost exactly 1.0 dB
     against R81 fully counter-clockwise (Q1 pinched off). */
-void biasTest()
+static void biasTest()
 {
     std::printf ("UREI factory test 10 (Q bias): R81 at its factory setting vs fully counter-clockwise\n");
     auto level = [] (bool ccw)
     {
-        Channel ch;
+        Ch ch;
         ch.setInput (Range::inputMax); ch.setOutput (Range::outputMax); ch.setRatio (Ratio::r20); ch.setRelease (7.0f); ch.setLimitOff (true);
         ch.prepare (96000.0);
         if (ccw)
         {
-            ch.circuitModel().setBiasPot (1.0);
-            ch.reset();   // settles the operating point with R81 there (reset() keeps the pot)
+            diagSetBias (ch, 1.0);   // settles the operating point with R81 there (reset() keeps the pot)
         }
         std::vector<float> x ((size_t) (96000 * 0.5));
         const double a = fromDb (dbfsOf (-30.0));
@@ -435,10 +444,10 @@ void biasTest()
 
 /** The GR meter: zero at idle (R55), -10 VU at 10 dB of settled reduction (R54), and its law
     elsewhere (linear in the control voltage). */
-void meterTracking()
+static void meterTracking()
 {
     std::printf ("GR meter tracking (UREI test 11 calibrates 0 and -10 VU), settled 1 kHz tones, Input full, 4:1\n");
-    const Setup setup = [] (Channel& c) { c.setInput (Range::inputMax); c.setRatio (Ratio::r4); };
+    const Setup setup = [] (Ch& c) { c.setInput (Range::inputMax); c.setRatio (Ratio::r4); };
     for (double target : { 5.0, 10.0, 20.0 })
     {
         const double level = levelForReduction (48000.0, target, setup, 6.0);
@@ -449,11 +458,11 @@ void meterTracking()
     }
 }
 
-void sampleRates()
+static void sampleRates()
 {
     std::printf ("sample-rate independence (no oversampling)\n");
     // 1 kHz at the 4:1 threshold + 15 dB, Input full, default attack / release.
-    const Setup setup = [] (Channel& c) { c.setInput (Range::inputMax); c.setRatio (Ratio::r4); };
+    const Setup setup = [] (Ch& c) { c.setInput (Range::inputMax); c.setRatio (Ratio::r4); };
     const double level = levelForReduction (48000.0, 1.0, setup) + 15.0;
     const auto a = steady (48000.0, level, 1000.0, setup), b = steady (192000.0, level, 1000.0, setup);
     const auto c = steady (44100.0, level, 1000.0, setup), d = steady (96000.0, level, 1000.0, setup);
@@ -465,13 +474,13 @@ void sampleRates()
     check (std::abs (a.outDb - b.outDb) < 0.15, what);
 }
 
-void hotInput()
+static void hotInput()
 {
     std::printf ("+24 dBu-equivalent input (beyond the hardware's maximum input level)\n");
     for (Ratio ratio : { Ratio::r4, Ratio::all, Ratio::none })
     {
         const auto r = run (48000.0, 1.0, sine (dbfsOf (24.0), 1000.0),
-                            [ratio] (Channel& c) { c.setInput (Range::inputMax); c.setOutput (Range::outputMax); c.setRatio (ratio); c.setAttack (7.0f); }, 256);
+                            [ratio] (Ch& c) { c.setInput (Range::inputMax); c.setOutput (Range::outputMax); c.setRatio (ratio); c.setAttack (7.0f); }, 256);
         float peak = 0.0f;
         for (float v : r.out) peak = std::max (peak, std::abs (v));
         char what[160];
@@ -480,12 +489,12 @@ void hotInput()
     }
 }
 
-void idleMeter()
+static void idleMeter()
 {
     std::printf ("meter at idle\n");
     for (Ratio ratio : { Ratio::r4, Ratio::r20, Ratio::none })
     {
-        const auto r = run (48000.0, 0.5, [] (double) { return 0.0; }, [ratio] (Channel& c) { c.setRatio (ratio); }, 256);
+        const auto r = run (48000.0, 0.5, [] (double) { return 0.0; }, [ratio] (Ch& c) { c.setRatio (ratio); }, 256);
         char what[160];
         std::snprintf (what, sizeof (what), "%-4s silence: GR %.3f dB, needle %.2f dB (0 VU)", ratioName (ratio), r.gr.back(), r.needle.back());
         check (std::abs (r.gr.back()) < 0.05 && std::abs (r.needle.back()) < 0.05, what);
@@ -494,12 +503,12 @@ void idleMeter()
 
 /** The VU scale: a +4 / +8 dBu tone applied suddenly takes the needle to 99 % of its deflection
     in 300 ms (+-10 %), overshooting 1-1.5 %, and back the same. */
-void vuBallistics()
+static void vuBallistics()
 {
     std::printf ("VU meter ballistics (+4 scale; ANSI C16.5 / IEC 60268-17: 99 %% in 300 ms, 1-1.5 %% overshoot)\n");
     const double fs = 48000.0;
     // No limiting (ratio None) so the output follows the input; find the input for 0 VU first.
-    const Setup setup = [] (Channel& c) { c.setRatio (Ratio::none); c.setMeterMode (MeterMode::plus4); };
+    const Setup setup = [] (Ch& c) { c.setRatio (Ratio::none); c.setMeterMode (MeterMode::plus4); };
     const auto probe = run (fs, 2.0, sine (-20.0, 1000.0), setup, 64);
     const double gainDb = probe.needle.back() - (-20.0 + 18.0 - 4.0);   // needle reads output dBu - 4
     const double inDbfs = 4.0 - 18.0 - gainDb;                           // input for 0 VU
@@ -530,10 +539,10 @@ void vuBallistics()
     check (std::abs (tFall - 0.224) < 0.0224, what);
 }
 
-void realtimeSafety()
+static void realtimeSafety()
 {
     std::printf ("real-time safety\n");
-    Channel ch;
+    Ch ch;
     ch.prepare (48000.0);
     std::vector<float> x (512);
     long allocations = 0;
@@ -559,12 +568,12 @@ void realtimeSafety()
     check (allocations == 0, what);
 }
 
-void performance()
+static void performance()
 {
     std::printf ("performance (one channel, this machine, music-like signal with 5-15 dB GR)\n");
     for (double fs : { 48000.0, 96000.0 })
     {
-        Channel ch;
+        Ch ch;
         ch.setInput (Range::inputMax);
         ch.prepare (fs);
         const int n = (int) (4.0 * fs);
@@ -575,9 +584,16 @@ void performance()
             x[(size_t) i] = (float) (fromDb (-40.0) * (0.5 * std::sin (2 * kPi * 110 * t) + 0.3 * std::sin (2 * kPi * 440 * t) + 0.2 * std::sin (2 * kPi * 3000 * t))
                                      * (1.0 + 0.5 * std::sin (2 * kPi * 2 * t)));
         }
-        const auto t0 = std::chrono::steady_clock::now();
-        for (int i = 0; i < n; i += 256) ch.process (x.data() + i, std::min (256, n - i));
-        const double secs = std::chrono::duration<double> (std::chrono::steady_clock::now() - t0).count();
+        // CPU time of this (single-threaded) run, best of three: a busy machine would otherwise show as a slow engine
+        double secs = 1e30;
+        for (int rep = 0; rep < 3; ++rep)
+        {
+            ch.reset();
+            std::vector<float> y = x;
+            const std::clock_t t0 = std::clock();
+            for (int i = 0; i < n; i += 256) ch.process (y.data() + i, std::min (256, n - i));
+            secs = std::min (secs, (double) (std::clock() - t0) / (double) CLOCKS_PER_SEC);
+        }
         const double rate = n / secs;
         char what[200];
         std::snprintf (what, sizeof (what), "%.0f kHz: %.0f samples/s per channel = %.2fx real time mono, %.2fx stereo (GR %.1f dB)",
@@ -585,11 +601,9 @@ void performance()
         check (rate > fs, what);
     }
 }
-} // namespace
 
-int main (int argc, char** argv)
+static void runSections (const std::vector<std::string>& wanted)
 {
-    // Optional arguments: names of the sections to run (default: all).
     struct Section { const char* name; void (*fn)(); };
     const Section sections[] = {
         { "dc", operatingPoint }, { "ratio", ratioTest }, { "threshold", thresholds }, { "none", noReduction },
@@ -597,6 +611,29 @@ int main (int argc, char** argv)
         { "rates", sampleRates }, { "hot", hotInput }, { "idle", idleMeter }, { "vu", vuBallistics }, { "rt", realtimeSafety },
         { "perf", performance },
     };
+    for (const auto& sec : sections)
+    {
+        bool want = wanted.empty();
+        for (const auto& w : wanted) want = want || w == sec.name;
+        if (want) sec.fn();
+    }
+}
+};
+
+} // namespace
+
+int main (int argc, char** argv)
+{
+    // Optional arguments: names of the sections to run (default: all), and --fast to run the same checks on
+    // the reduced-circuit engine (urei1176::FastChannel) instead of the circuit engine (the operating-point
+    // section checks the circuit's nodes and is for the circuit engine only).
+    std::vector<std::string> wanted;
+    bool fast = false;
+    for (int i = 1; i < argc; ++i)
+    {
+        if (std::string (argv[i]) == "--fast") fast = true;
+        else wanted.push_back (argv[i]);
+    }
     // MSVC's _IOLBF validates the buffer size as 2..INT_MAX even when buffer is null, so 0
     // invokes the invalid-parameter handler and fast-fails before the first test output.
     if (std::setvbuf (stdout, nullptr, _IONBF, 0) != 0)
@@ -604,13 +641,16 @@ int main (int argc, char** argv)
         std::fprintf (stderr, "failed to disable stdout buffering\n");
         return 1;
     }
-    std::printf ("UREI 1176LN channel tests\n");
-    for (const auto& sec : sections)
+    std::printf (fast ? "UREI 1176LN channel tests (fast engine)\n" : "UREI 1176LN channel tests\n");
+    if (fast)
     {
-        bool wanted = argc < 2;
-        for (int i = 1; i < argc; ++i) wanted = wanted || std::string (argv[i]) == sec.name;
-        if (wanted) sec.fn();
+        std::vector<std::string> w;
+        for (const auto& n : wanted) if (n != "dc") w.push_back (n);
+        if (wanted.empty()) for (const char* n : { "ratio", "threshold", "none", "timing", "thd", "unity", "bias", "meter", "rates", "hot", "idle", "vu", "rt", "perf" }) w.push_back (n);
+        Tests<FastChannel>::runSections (w);
     }
+    else
+        Tests<Channel>::runSections (wanted);
     std::printf (failures == 0 ? "all checks passed\n" : "%d check(s) failed\n", failures);
     return failures == 0 ? 0 : 1;
 }
