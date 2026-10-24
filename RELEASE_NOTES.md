@@ -47,9 +47,10 @@ A faster engine, two new controls, and the gain-reduction amplifier solved as tr
   saved with v0.1.0 load as Dual. A v0.1.0 session with Attack at OFF loads with the Attack Off switch
   on and Attack at 1. Output is not bit-identical to v0.1.0. Latency is 0 samples.
 - macOS Universal: AU and VST3, arm64 + x86_64, ad-hoc signed, not notarized.
-- Windows x64: VST3, built natively with MSVC on windows-2022, unsigned. CTest result: TO BE FILLED IN
-  after the Windows run (three tests: `plugin1167_test`, `plugin1167_test_fast`,
-  `plugin1167_stereo_test`).
+- Windows x64: VST3, built natively with MSVC on windows-2022, unsigned. CTest 3/3 on windows-2022
+  (`plugin1167_test` 151 s, `plugin1167_test_fast` 7 s, `plugin1167_stereo_test` 3 s); the VST3 is
+  PE32+ x86-64 and exports `GetPluginFactory`. Requires the Microsoft Visual C++ x64
+  Redistributable.
 - Checked before release on macOS: CTest 3/3 (`plugin1167_test`, `plugin1167_test_fast`,
   `plugin1167_stereo_test`); snapshot tool checks passed and both editor images rendered; AU and VST3
   slices arm64 + x86_64; ad-hoc signatures, ZIP integrity and SHA-256 verified by the packaging
