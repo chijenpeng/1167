@@ -1,5 +1,12 @@
 # 1167 release notes
 
+## v0.2.1
+
+- **Meter readout removed.** The numeric gain-reduction readout under the VU meter (`GR ... dB`, or
+  `M` and `S` in M/S) is gone. The meter, its needle, and the meter's hover help are otherwise
+  unchanged. The hood under the needle stays.
+- DSP, parameters, state and plug-in identity are unchanged from v0.2.0.
+
 ## v0.2.0
 
 A faster engine, two new controls, and the gain-reduction amplifier solved as transistors.

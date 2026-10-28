@@ -120,11 +120,8 @@ class VuMeter final : public juce::Component
 public:
     VuMeter();
 
-    /** The needle (dB on the VU scale), the gain cell's reduction (dB, >= 0) for the readout,
-        and the meter mode. Repaints only when something visible changed. */
-    void setReading (float needleDb, float gainReductionDb, urei1176::MeterMode mode);
-    /** Mid-side: the readout gives the two units' reductions, M and S, instead of one (the larger) figure. */
-    void setMidSide (bool on, float midDb, float sideDb);
+    /** The needle (dB on the VU scale) and the meter mode. Repaints only when something visible changed. */
+    void setReading (float needleDb, urei1176::MeterMode mode);
     void paint (juce::Graphics&) override;
 
 private:
@@ -133,8 +130,7 @@ private:
     /** Angle (radians, clockwise from 12 o'clock) of a VU reading. */
     static float angleFor (float db) noexcept;
 
-    float needleDb = urei1176::Range::meterMinDb, grDb = 0.0f, midGrDb = 0.0f, sideGrDb = 0.0f;
-    bool midSide = false;
+    float needleDb = urei1176::Range::meterMinDb;
     urei1176::MeterMode mode = urei1176::MeterMode::gainReduction;
 };
 
@@ -164,7 +160,6 @@ private:
     AttackOffSwitch attackOff;
     VuMeter vu;
 
-    float shownGrDb = 0.0f, shownMidDb = 0.0f, shownSideDb = 0.0f;
     juce::String helpTitle, helpText;
     juce::Rectangle<int> helpArea;
 };

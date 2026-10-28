@@ -40,7 +40,7 @@ Get the latest packages from the [1167 releases page](https://github.com/chijenp
     floating offset source, which nulls two units' idle difference, is not modelled: its values are
     unverified, and two identical units have none to null. With identical L and R, Link is Dual.
   - **M/S**: the two units see M = (L + R) / 2 and S = (L - R) / 2 and the output is L = M + S,
-    R = M - S; the meter readout gives M and S. A mono-compatible source sounds as in Dual.
+    R = M - S. A mono-compatible source sounds as in Dual.
 
   Switching mode while playing does not click: Link glides the two units' control voltages together
   over about 15 ms, M/S morphs its matrix in or out over 10 ms.

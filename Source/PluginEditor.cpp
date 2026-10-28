@@ -391,8 +391,7 @@ VuMeter::VuMeter()
 {
     setHelp (*this, "Meter",
              "A VU movement (300 ms to settle), as on the hardware. On GR it reads the control voltage: it rests at 0, "
-             "falls to the left and over-reads fast peaks as the real meter does. Bottom left: the gain cell's actual "
-             "reduction (the larger of the two units), without the meter's ballistics. In M/S it gives M and S separately.");
+             "falls to the left and over-reads fast peaks as the real meter does.");
 }
 
 float VuMeter::angleFor (float db) noexcept
@@ -414,35 +413,21 @@ float VuMeter::radius() const
     return (float) getWidth() * 0.42f / std::sin (kHalfSweep);
 }
 
-void VuMeter::setReading (float newNeedleDb, float newGrDb, urei1176::MeterMode newMode)
+void VuMeter::setReading (float newNeedleDb, urei1176::MeterMode newMode)
 {
     const bool needleMoved = std::abs (angleFor (newNeedleDb) - angleFor (needleDb)) > 0.0005f;
-    const bool readoutChanged = juce::String (newGrDb, 1) != juce::String (grDb, 1);
 
-    if (needleMoved || readoutChanged || newMode != mode)
+    if (needleMoved || newMode != mode)
     {
         needleDb = newNeedleDb;
-        grDb = newGrDb;
         mode = newMode;
-        repaint();
-    }
-}
-
-void VuMeter::setMidSide (bool on, float midDb, float sideDb)
-{
-    const bool changedReadout = on && (juce::String (midDb, 1) != juce::String (midGrDb, 1) || juce::String (sideDb, 1) != juce::String (sideGrDb, 1));
-    if (on != midSide || changedReadout)
-    {
-        midSide = on;
-        midGrDb = midDb;
-        sideGrDb = sideDb;
         repaint();
     }
 }
 
 void VuMeter::paint (juce::Graphics& g)
 {
-    // The face, and at its foot the hood over the needle's pivot, which carries the readout.
+    // The face, and at its foot the hood over the needle's pivot.
     const auto faceArea = getLocalBounds().toFloat();
     const auto hood = faceArea.withTop (faceArea.getBottom() - kHoodHeight);
     g.setColour (Theme::face);
@@ -485,28 +470,6 @@ void VuMeter::paint (juce::Graphics& g)
     g.setFont (Theme::titleFont (10.0f));
     g.drawText ("VU", juce::Rectangle<float> (faceArea.getX(), centre.y - r + 35.0f, faceArea.getWidth(), 12.0f),
                 juce::Justification::centred, false);
-
-    // The gain cell's reduction, as a number; in mid-side the two units' own, M and S.
-    auto readout = hood.reduced (8.0f, 0.0f);
-    const auto reduction = [] (float db) { return (db >= 0.05f ? minusSign() : juce::String()) + juce::String (db, 1); };
-    g.setColour (Theme::label);
-    g.setFont (Theme::labelFont (8.0f));
-    if (midSide)
-    {
-        g.drawText ("M", readout.removeFromLeft (10.0f), juce::Justification::centredLeft, false);
-        g.setFont (Theme::valueFont (9.0f));
-        g.drawText (reduction (midGrDb), readout.removeFromLeft (38.0f), juce::Justification::centredLeft, false);
-        g.setFont (Theme::labelFont (8.0f));
-        g.drawText ("S", readout.removeFromLeft (10.0f), juce::Justification::centredLeft, false);
-        g.setFont (Theme::valueFont (9.0f));
-        g.drawText (reduction (sideGrDb) + " dB", readout, juce::Justification::centredLeft, false);
-    }
-    else
-    {
-        g.drawText ("GR", readout.removeFromLeft (18.0f), juce::Justification::centredLeft, false);
-        g.setFont (Theme::valueFont (9.0f));
-        g.drawText (reduction (grDb) + " dB", readout, juce::Justification::centredLeft, false);
-    }
 
     // The needle, from its pivot under the hood.
     juce::Graphics::ScopedSaveState state (g);
@@ -588,24 +551,14 @@ void EditorView::updateMeters()
     const auto meters = processor.getMeters();
 
     // One needle for both channels: on GR the one reducing more, on +4 / +8 the louder.
-    float needle = meters.needleDb[0], gr = meters.gainReductionDb[0];
+    float needle = meters.needleDb[0];
     for (int ch = 1; ch < meters.channels; ++ch)
     {
         needle = mode == urei1176::MeterMode::gainReduction ? juce::jmin (needle, meters.needleDb[(size_t) ch])
                                                              : juce::jmax (needle, meters.needleDb[(size_t) ch]);
-        gr = juce::jmax (gr, meters.gainReductionDb[(size_t) ch]);
     }
 
-    // The readout rises at once and falls at about 20 dB/s, so it can be read.
-    shownGrDb = juce::jmax (gr, shownGrDb - 0.7f);
-    vu.setReading (needle, shownGrDb, mode);
-
-    // In mid-side the readout gives the two units separately, M and S.
-    const bool midSide = juce::roundToInt (processor.apvts.getRawParameterValue (ParamID::stereo)->load()) == (int) urei1176::StereoMode::midSide
-                         && meters.channels == 2;
-    shownMidDb = juce::jmax (meters.gainReductionDb[0], shownMidDb - 0.7f);
-    shownSideDb = juce::jmax (meters.gainReductionDb[1], shownSideDb - 0.7f);
-    vu.setMidSide (midSide, shownMidDb, shownSideDb);
+    vu.setReading (needle, mode);
 }
 
 void EditorView::showHelpFor (juce::Component* component)
