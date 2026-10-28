@@ -109,6 +109,9 @@ jobs:
 
           $zipPath = Join-Path $env:RUNNER_TEMP "1167-$version-windows-x64.zip"
           Compress-Archive -Path (Join-Path $packageRoot "*") -DestinationPath $zipPath -CompressionLevel Optimal
+          $zipName = Split-Path -Leaf $zipPath
+          $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $zipPath).Hash.ToLower()
+          [System.IO.File]::WriteAllText("$zipPath.sha256", "$hash  $zipName`n")
           "PACKAGE_PATH=$zipPath" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
       - name: Upload package to the existing draft release
@@ -120,4 +123,4 @@ jobs:
           if ($LASTEXITCODE -ne 0 -or $isDraft.Trim() -ne "true") {
             throw "Release $env:RELEASE_TAG must already exist as a draft."
           }
-          gh release upload $env:RELEASE_TAG $env:PACKAGE_PATH --repo $env:GITHUB_REPOSITORY --clobber
+          gh release upload $env:RELEASE_TAG $env:PACKAGE_PATH "$($env:PACKAGE_PATH).sha256" --repo $env:GITHUB_REPOSITORY --clobber
