@@ -40,8 +40,8 @@ Three selectable revisions, a detector high-pass filter and new Attack and Relea
   keep the v0.2.0 migration (Dual; Attack OFF becomes the Attack Off switch with Attack at 1).
   Latency is 0 samples.
 - macOS Universal: AU and VST3, arm64 + x86_64, ad-hoc signed, not notarized.
-- Windows x64: VST3, built natively with MSVC on windows-2022, unsigned. CTest result to be added
-  after the Windows run.
+- Windows x64: VST3, built natively with MSVC on windows-2022, unsigned. Windows CTest 4/4
+  ([run 40870013432](https://github.com/chijenpeng/1167/actions/runs/40870013432)).
 - macOS CTest 4/4 (`plugin1167_test`, `plugin1167_test_fast`, `plugin1167_stereo_test`,
   `plugin1167_palette_contrast`).
 
