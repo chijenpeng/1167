@@ -109,7 +109,6 @@ public:
     const std::string& getName() const noexcept { return name; }
     /** Debug: prints every reactive element's voltage and companion current. */
     void dumpReactive (const char* label) const;
-    void setComputeAllNodes (bool) noexcept {}
     std::string describe() const;
 
 private:

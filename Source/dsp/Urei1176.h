@@ -3,8 +3,11 @@
 // UREI 1176LN limiting amplifier, one channel, modelled component for component from UREI's
 // drawing for serial suffix F (2611-7052): the bridged-T Input attenuator and input transformer
 // T1 (UTC O-12), the FET gain cell, preamp, side chain with the Attack knob's OFF switch,
-// discrete class AB line amp and output transformer T2 (B11148, 1:1.73) into a 10 kohm bridging
-// load. See docs/reference/schematic.md and docs/research/urei-1176.md.
+// discrete class AB line amp and output transformer T2 (B11148, 1:1.73; rev G: 16-11148 with R84 1 k
+// across the secondary) into a 10 kohm bridging load. Rev G replaces the bridged-T and T1 with a 5532
+// receiver and a 10 k Input pot. See docs/reference/schematic.md and docs/research/urei-1176.md.
+
+#include "Versions.h"
 
 #include <atomic>
 #include <memory>
@@ -25,6 +28,8 @@ struct Range
         ("0"); 0.5 is "24", the 12 o'clock unity-gain setting. See dialMarking(). */
     static constexpr float inputMin = 0.0f, inputMax = 1.0f, inputDefault = 0.5f;
     static constexpr float outputMin = 0.0f, outputMax = 1.0f, outputDefault = 0.5f;
+    /** attackDefault / releaseDefault: the engines' power-up values (the reference, the goldens and the fits use them); the plug-in's
+        parameter defaults are Default::attack / release in PluginProcessor.h. */
     static constexpr float attackMin = 1.0f, attackMax = 7.0f, attackDefault = 4.0f;
     static constexpr float releaseMin = 1.0f, releaseMax = 7.0f, releaseDefault = 4.0f;
     static constexpr float calibrationMin = 10.0f, calibrationMax = 26.0f, calibrationDefault = 18.0f;
@@ -66,6 +71,9 @@ public:
     /** Builds the circuit for this sample rate (44.1 to 192 kHz) and settles its operating
         point. The controls keep their values across calls. */
     void prepare (double sampleRate);
+    /** The same for a revision (the circuit engine builds F, G and J; D builds as F until it has a netlist of its own).
+        The revision is kept for later prepare (sampleRate) calls. */
+    void prepare (double sampleRate, Version v);
     /** Clears all state (capacitor charges, the gain reduction, the meter) to the idle
         operating point with the present control values. */
     void reset();
@@ -87,6 +95,9 @@ public:
     void setMeterMode (MeterMode mode) noexcept;
     /** The dBu that 0 dBFS stands for (10..26 dBu), at the input and at the output. */
     void setCalibrationDbu (float dbu) noexcept;
+    /** The version's level trims (VersionSpec::inputTrimDb / outputTrimDb, Custom) in the calibration layer; on by default. false takes
+        them off, so that the engine's level is the circuit's own (the factory-procedure tests). Keeps its value across prepare(). */
+    void setVersionTrims (bool on) noexcept { trimsOn = on; updateScale(); }
 
     /** In place: floats at the plug-in's input, floats at its output. */
     void process (float* samples, int numSamples) noexcept;
@@ -122,6 +133,7 @@ public:
         bool limitOff = false;
         MeterMode meter = MeterMode::gainReduction;
         float calibrationDbu = Range::calibrationDefault;
+        int sidechainFilter = 0;   // FastChannel only: 0 off, 1..5 = 30, 60, 105, 125, 185 Hz (the reference Channel ignores it)
     };
     const Controls& controls() const noexcept { return ctl; }
 
@@ -136,6 +148,7 @@ private:
     double fs = 0.0;
     double unitVolts = 1.0;             // peak volts that 1.0 stands for
     double inGain = 1.0, outGain = 1.0; // float -> source EMF, load volts -> float
+    bool trimsOn = true;
     double vuReference = 1.0;           // mean |v| at 0 VU for the selected scale
     int countdown = 0;
     double needle = 0.0, needleSpeed = 0.0;   // movement deflection (1 = 0 VU) and its rate

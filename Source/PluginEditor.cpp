@@ -4,20 +4,21 @@
 
 namespace
 {
-    // The analog-recreation / drum-gate language: flat, dark, no borders. Pale discs are the
-    // things you turn; white and pale type is what is selected; the quieter grey names things.
+    // The analog-recreation / drum-gate language: flat, no borders, on a dark or a light face. The discs
+    // are the things you turn; the pale cue colour (or white) is what is selected; the quieter label
+    // colour names things. The colours come from the palette of the selected version (Palette.h), per
+    // editor instance: `col (component, paletteLabel)` reads what the editor set on itself or on its
+    // view. `Theme` below holds only the fonts and text measuring.
+    juce::Colour col (const juce::Component& c, int id) { return c.findColour (id, true); }
+
+    /** An option's ink: the selected one in `pale`, the hovered one in `text`, the others in `label` at 70 %. */
+    juce::Colour optionInk (const juce::Component& c, bool selected, bool hovered)
+    {
+        return col (c, selected ? palettePale : (hovered ? paletteText : paletteLabel)).withMultipliedAlpha (selected || hovered ? 1.0f : 0.7f);
+    }
+
     namespace Theme
     {
-        const juce::Colour background { 0xff0e0e0f }, panel { 0xff1c1c1e }, text { 0xffffffff },
-                           label { 0xffa6a6a8 }, accent { 0xff5b8cff }, pale { 0xffcfeef8 },
-                           clipping { 0xffff5a5a }, field { 0xff38383b };
-
-        // The VU face: the panel grey, a shade warmer, for the 1176's cream meter; its hood is
-        // the plain panel grey.
-        const juce::Colour face { 0xff24221e }, hood = panel;
-        // Its red zone, quieter than the clipping red it comes from.
-        const juce::Colour redZone = clipping.withMultipliedSaturation (0.7f).withAlpha (0.7f);
-
         juce::Font make (const juce::Typeface::Ptr& typeface, float height, float tracking)
         {
             return juce::Font (juce::FontOptions (typeface).withHeight (height)).withExtraKerningFactor (tracking);
@@ -42,10 +43,7 @@ namespace
     const juce::Identifier helpId ("help"), helpTitleId ("helpTitle"), editorScaleId ("editorScale"), dimmedId ("dimmed");
 
     constexpr auto kDefaultHelpTitle = "1167";
-    constexpr auto kDefaultHelp =
-        "1167 is an independent model inspired by the UREI 1176LN revision F (blackface). In stereo it runs "
-        "two units: independent, tied as with the 1176SA adapter, or on mid and side. Hover over a control to see "
-        "what it does; double-click a knob for its default, or its value to type one.";
+    constexpr auto kHoverHint = "Hover over a control to see what it does; double-click a knob for its default, or its value to type one.";
 
     void setHelp (juce::Component& c, const juce::String& title, const juce::String& help)
     {
@@ -54,6 +52,57 @@ namespace
     }
 
     juce::String minusSign() { return juce::String::fromUTF8 ("\xE2\x88\x92"); }
+    juce::String dot() { return juce::String::fromUTF8 (" \xC2\xB7 "); }
+
+    /** The spec of a Version choice index (F G J; clamped). */
+    const urei1176::VersionSpec& specAt (int index) { return urei1176::specFor (versionForChoice (index)); }
+    bool isSilver (const urei1176::Palette& p) { return &p == &urei1176::silverFace; }
+
+    /** Each version writes its own copy. */
+    juce::String defaultHelpFor (int index)
+    {
+        const auto& spec = specAt (index);
+        if (spec.version == urei1176::Version::F)
+            return "1167 is an independent model inspired by the UREI 1176LN revision F (blackface). In stereo it runs "
+                   "two units: independent, tied as with the 1176SA adapter, or on mid and side. " + juce::String (kHoverHint);
+        if (spec.version == urei1176::Version::G)
+            return "1167 is an independent model inspired by the UREI 1176LN revision G (blackface). G has a 5532 bridging input into a 10 k Input pot, a regulated "
+                   "30.3 V supply and an output transformer loaded by R84. Input and output are trimmed so that its threshold and loudness match F's at the same dials "
+                   "(a plug-in choice, not circuit). " + juce::String (kHoverHint);
+        // J: the last of the choices (specAt gives F, G or J)
+        return "1167 is an independent model inspired by the UREI 1176LN revision J (silverface), from the sheet titled H as revised through J: G's 5532 input, "
+               "R33 and C13 as an AC ground, transformer 163-12614 (data assumed). Levels trimmed to F's (a plug-in choice); colours chosen for the plug-in. " + juce::String (kHoverHint);
+    }
+
+    juce::String versionRowHelp()
+    {
+        return "Which 1176LN revision to model: F, G or J. F is the revision this plug-in has modelled from the start; G and J are modelled too, each with its own "
+               "circuit values. The colours are chosen for the plug-in after the hardware: black face for F and G, silver face for J.";
+    }
+}
+
+namespace
+{
+    template <typename Target>
+    void setPaletteColours (Target& target, const urei1176::Palette& p)
+    {
+        const std::pair<int, uint32_t> colours[] {
+            { paletteBackground, p.background }, { paletteField, p.field }, { paletteLabel, p.label },
+            { palettePale, p.pale }, { paletteDiscHover, p.discHover }, { paletteText, p.text }, { paletteAccent, p.accent },
+            { paletteVuFace, p.vuFace }, { paletteVuHood, p.vuHood }, { paletteVuInk, p.vuInk },
+            { paletteVuNeedle, p.vuNeedle }, { paletteRedZone, p.redZone }
+        };
+        for (const auto& [id, argb] : colours)
+            target.setColour (id, juce::Colour (argb));
+    }
+}
+
+void applyPalette (juce::Component& target, const urei1176::Palette& p)   { setPaletteColours (target, p); }
+void applyPalette (juce::LookAndFeel& target, const urei1176::Palette& p) { setPaletteColours (target, p); }
+
+const urei1176::Palette& paletteFor (const urei1176::VersionSpec& spec) noexcept
+{
+    return spec.version == urei1176::Version::J && ! spec.placeholderOfF ? urei1176::silverFace : urei1176::blackFace;
 }
 
 //==============================================================================
@@ -64,6 +113,12 @@ EditorFonts::EditorFonts()
 }
 
 //==============================================================================
+FlatLookAndFeel::FlatLookAndFeel()
+{
+    // The resizer has no component to ask, so it reads this look-and-feel, which the editor keeps in step with its palette.
+    applyPalette (*this, urei1176::blackFace);
+}
+
 void FlatLookAndFeel::drawRotarySlider (juce::Graphics& g, int x, int y, int width, int height, float position,
                                         float startAngle, float endAngle, juce::Slider& slider)
 {
@@ -75,17 +130,17 @@ void FlatLookAndFeel::drawRotarySlider (juce::Graphics& g, int x, int y, int wid
 
     // A knob whose parameter has no effect at the moment (Attack while the limiter is switched off) is drawn at 45 %: it still turns.
     const float alpha = slider.getProperties().getWithDefault (dimmedId, false) ? 0.45f : 1.0f;
-    g.setColour ((slider.isMouseOverOrDragging() ? Theme::pale.brighter (0.1f) : Theme::pale).withMultipliedAlpha (alpha));
+    g.setColour (col (slider, slider.isMouseOverOrDragging() ? paletteDiscHover : palettePale).withMultipliedAlpha (alpha));
     g.fillEllipse (juce::Rectangle<float> (radius * 2.0f, radius * 2.0f).withCentre (centre));
 
-    g.setColour (Theme::background);
+    g.setColour (col (slider, paletteBackground));
     g.fillEllipse (juce::Rectangle<float> (dot * 2.0f, dot * 2.0f).withCentre (centre.getPointOnCircumference (radius * 0.72f, angle)));
 }
 
 void FlatLookAndFeel::drawCornerResizer (juce::Graphics& g, int w, int h, bool isMouseOver, bool isMouseDragging)
 {
     // Three short diagonals in the label grey, quiet until touched.
-    g.setColour (Theme::label.withAlpha (isMouseOver || isMouseDragging ? 0.8f : 0.3f));
+    g.setColour (findColour (paletteLabel).withAlpha (isMouseOver || isMouseDragging ? 0.8f : 0.3f));
     const float size = (float) juce::jmin (w, h);
     for (float i = 0.3f; i < 1.0f; i += 0.3f)
         g.drawLine ((float) w - size * i, (float) h - 2.0f, (float) w - 2.0f, (float) h - size * i, 1.0f);
@@ -116,7 +171,7 @@ Knob::Knob (juce::AudioProcessorValueTreeState& state, const char* paramId, cons
         // The dial's own range, 1 to 7: the parameter's OFF stretch below it is not on this knob.
         auto& param = *state.getParameter (paramId);
         slider.setRange (urei1176::Range::attackMin, urei1176::Range::attackMax, 0.0);
-        slider.setDoubleClickReturnValue (true, urei1176::Range::attackDefault);
+        slider.setDoubleClickReturnValue (true, Default::attack);
         slider.textFromValueFunction = [] (double v) { return ParamText::attack ((float) v); };
         slider.valueFromTextFunction = [] (const juce::String& t)
         {
@@ -147,9 +202,6 @@ Knob::Knob (juce::AudioProcessorValueTreeState& state, const char* paramId, cons
     editor.setJustification (juce::Justification::centred);
     editor.setFont (Theme::valueFont (12.0f));
     editor.setIndents (0, 0);
-    editor.setColour (juce::TextEditor::backgroundColourId, Theme::field);
-    editor.setColour (juce::TextEditor::textColourId, Theme::pale);
-    editor.setColour (juce::TextEditor::highlightColourId, Theme::accent.withAlpha (0.5f));
     editor.setColour (juce::TextEditor::outlineColourId, juce::Colours::transparentBlack);
     editor.setColour (juce::TextEditor::focusedOutlineColourId, juce::Colours::transparentBlack);
     editor.onReturnKey = [this] { finishEditing (true); };
@@ -158,6 +210,13 @@ Knob::Knob (juce::AudioProcessorValueTreeState& state, const char* paramId, cons
     addChildComponent (editor);
 
     setHelp (*this, name, help);
+}
+
+void Knob::refreshColours()
+{
+    editor.setColour (juce::TextEditor::backgroundColourId, col (*this, paletteField));
+    editor.setColour (juce::TextEditor::textColourId, col (*this, palettePale));
+    editor.setColour (juce::TextEditor::highlightColourId, col (*this, paletteAccent).withAlpha (0.5f));
 }
 
 void Knob::setDimmed (bool shouldDim)
@@ -182,7 +241,7 @@ void Knob::paint (juce::Graphics& g)
 {
     auto area = getLocalBounds();
 
-    const auto textColour = Theme::label.withMultipliedAlpha (dimmed ? 0.6f : 1.0f);
+    const auto textColour = col (*this, paletteLabel).withMultipliedAlpha (dimmed ? 0.6f : 1.0f);
     g.setColour (textColour);
     g.setFont (Theme::labelFont());
     g.drawText (name, area.removeFromTop (kLabelHeight), juce::Justification::centred, false);
@@ -272,14 +331,14 @@ int OptionRow::optionAt (int x) const
 void OptionRow::paint (juce::Graphics& g)
 {
     g.setFont (Theme::labelFont());
-    g.setColour (Theme::label);
+    g.setColour (col (*this, paletteLabel));
     g.drawText (label, 0, 0, labelColumn, getHeight(), juce::Justification::centredLeft, false);
 
     const auto ranges = optionRanges();
     for (int i = 0; i < options.size(); ++i)
     {
         const auto range = ranges[(size_t) i];
-        g.setColour (i == selected ? Theme::pale : (i == hovered ? Theme::text : Theme::label.withAlpha (0.7f)));
+        g.setColour (optionInk (*this, i == selected, i == hovered));
         g.drawText (options[i].toUpperCase(), range.getStart(), 0, range.getLength() + 4, getHeight(),
                     juce::Justification::centredLeft, false);
     }
@@ -342,9 +401,9 @@ int AttackOffSwitch::preferredWidth() const
 void AttackOffSwitch::paint (juce::Graphics& g)
 {
     g.setFont (Theme::labelFont());
-    g.setColour (Theme::label);
+    g.setColour (col (*this, paletteLabel));
     g.drawText ("ATTACK", 0, 0, labelColumn, getHeight(), juce::Justification::centredLeft, false);
-    g.setColour (isLit() ? Theme::pale : (hovered ? Theme::text : Theme::label.withAlpha (0.7f)));
+    g.setColour (optionInk (*this, isLit(), hovered));
     g.drawText ("OFF", optionRange().withWidth (optionRange().getWidth() + 4), juce::Justification::centredLeft, false);
 }
 
@@ -430,11 +489,11 @@ void VuMeter::paint (juce::Graphics& g)
     // The face, and at its foot the hood over the needle's pivot.
     const auto faceArea = getLocalBounds().toFloat();
     const auto hood = faceArea.withTop (faceArea.getBottom() - kHoodHeight);
-    g.setColour (Theme::face);
+    g.setColour (col (*this, paletteVuFace));
     g.fillRoundedRectangle (faceArea, kCorner);
     juce::Path hoodShape;
     hoodShape.addRoundedRectangle (hood.getX(), hood.getY(), hood.getWidth(), hood.getHeight(), kCorner, kCorner, false, false, true, true);
-    g.setColour (Theme::hood);
+    g.setColour (col (*this, paletteVuHood));
     g.fillPath (hoodShape);
 
     // With the meter switched off the scale goes quiet, as an unlit meter does.
@@ -446,9 +505,9 @@ void VuMeter::paint (juce::Graphics& g)
     juce::Path line, red;
     line.addCentredArc (centre.x, centre.y, r, r, 0.0f, angleFor (urei1176::Range::meterMinDb), angleFor (0.0f), true);
     red.addCentredArc (centre.x, centre.y, r + 1.0f, r + 1.0f, 0.0f, angleFor (0.0f), angleFor (urei1176::Range::meterMaxDb), true);
-    g.setColour (Theme::label.withAlpha (0.7f * scaleAlpha));
+    g.setColour (col (*this, paletteVuInk).withAlpha (0.7f * scaleAlpha));
     g.strokePath (line, juce::PathStrokeType (1.0f));
-    g.setColour (Theme::redZone.withMultipliedAlpha (scaleAlpha));
+    g.setColour (col (*this, paletteRedZone).withMultipliedAlpha (scaleAlpha));
     g.strokePath (red, juce::PathStrokeType (3.0f, juce::PathStrokeType::mitered, juce::PathStrokeType::butt));
 
     // Marks and figures.
@@ -457,7 +516,7 @@ void VuMeter::paint (juce::Graphics& g)
     {
         const float a = angleFor (mark);
         const bool plus = mark > 0.0f;
-        g.setColour ((plus ? Theme::redZone : Theme::label).withMultipliedAlpha (scaleAlpha));
+        g.setColour (col (*this, plus ? paletteRedZone : paletteVuInk).withMultipliedAlpha (scaleAlpha));
         g.drawLine ({ centre.getPointOnCircumference (r, a), centre.getPointOnCircumference (r + 5.0f, a) }, mark == 0.0f ? 1.5f : 1.0f);
 
         const auto text = mark < 0.0f ? minusSign() + juce::String ((int) -mark)
@@ -466,7 +525,7 @@ void VuMeter::paint (juce::Graphics& g)
         g.drawText (text, juce::Rectangle<float> (22.0f, 10.0f).withCentre (at), juce::Justification::centred, false);
     }
 
-    g.setColour (Theme::label.withAlpha (0.5f * scaleAlpha));
+    g.setColour (col (*this, paletteVuInk).withAlpha (0.7f * scaleAlpha));
     g.setFont (Theme::titleFont (10.0f));
     g.drawText ("VU", juce::Rectangle<float> (faceArea.getX(), centre.y - r + 35.0f, faceArea.getWidth(), 12.0f),
                 juce::Justification::centred, false);
@@ -474,7 +533,7 @@ void VuMeter::paint (juce::Graphics& g)
     // The needle, from its pivot under the hood.
     juce::Graphics::ScopedSaveState state (g);
     g.reduceClipRegion (faceArea.withBottom (hood.getY()).toNearestInt());
-    g.setColour (Theme::pale);
+    g.setColour (col (*this, paletteVuNeedle));
     g.drawLine ({ centre, centre.getPointOnCircumference (r + 2.0f, angleFor (needleDb)) }, 1.25f);
 }
 
@@ -490,7 +549,8 @@ EditorView::EditorView (Urei1176Processor& p)
               "unit limits; turned far up it drives the output amplifier into clipping, as on the hardware.",
               64, 320.0f),
       release (p.apvts, ParamID::release, "Release",
-               "How quickly the gain recovers once the level drops: 7 (fully clockwise) is the fastest, about 90 ms; 1 about 1.3 s.",
+               "How quickly the gain recovers once the level drops: 7 (fully clockwise) is the fastest, 1 the slowest. Measured on this model, "
+               "as the time to recover 63 % of a 6.7 dB reduction: 88 ms at 7, 1.28 s at 1 (UREI's manual gives 50 ms to 1.1 s).",
                64),
       calibration (p.apvts, ParamID::calibration, "0 dBFS",
                    "The level in dBu that 0 dBFS (a full-scale sine) stands for, at the input and at the output. The 1176's "
@@ -498,8 +558,9 @@ EditorView::EditorView (Urei1176Processor& p)
                    "at 24 stay at about unity gain whatever this is.",
                    36),
       attack (Knob::makeAttackKnob (p.apvts,
-              "How quickly it clamps down: 7 (fully clockwise) is the fastest, about 0.25 ms; 1 about 4 ms. To switch limiting off "
-              "use ATTACK OFF; the knob keeps its setting.",
+              "How quickly it clamps down: 7 (fully clockwise) is the fastest. On this model, 0.25 ms at 7 to 3.7 ms at 1, measured as the time to reach "
+              "63 % of the reduction found 25 ms into a burst 10 dB over the threshold (UREI's manual: 20 to 800 microseconds). "
+              "To switch limiting off use ATTACK OFF.",
               64)),
       ratioRow (*p.apvts.getParameter (ParamID::ratio), "Ratio", { "4", "8", "12", "20", "All" },
                 "4 to 20: how hard it limits above the threshold, which rises with the ratio. ALL is every button pressed in at "
@@ -515,12 +576,19 @@ EditorView::EditorView (Urei1176Processor& p)
                  "get the same gain reduction, set mostly by the louder one (derived from the circuit; the adapter's own values are not known). "
                  "M/S: the units see mid and side, M = (L + R) / 2 and S = (L " + minusSign() + " R) / 2, and the meter reads M and S. "
                  "Mono tracks ignore this."),
-      attackOff (p.apvts)
+      sidechainRow (*p.apvts.getParameter (ParamID::sidechainFilter), "S/C HPF", { "OFF", "30", "60", "105", "125", "185" },
+                    "A high-pass filter on the detector only; the audio you hear is not filtered. OFF, or 30 to 185 Hz (6 dB per octave): "
+                    "the higher it is, the less low frequencies push the compressor. In M/S it acts on the mid and side detectors. "
+                    "A plug-in addition, not on the original 1176."),
+      versionRow (*p.apvts.getParameter (ParamID::model), "Rev", modelChoiceNames(), versionRowHelp()),
+      attackOff (p.apvts),
+      versionAttachment (*p.apvts.getParameter (ParamID::model), [this] (float v) { versionChanged (juce::roundToInt (v)); })
 {
     const std::pair<juce::Component*, const char*> controls[] {
         { &input, ParamID::input }, { &output, ParamID::output }, { attack.get(), ParamID::attack }, { &release, ParamID::release },
         { &calibration, ParamID::calibration }, { &ratioRow, ParamID::ratio }, { &meterRow, ParamID::meter },
-        { &stereoRow, ParamID::stereo }, { &attackOff, ParamID::attackOff }
+        { &stereoRow, ParamID::stereo }, { &sidechainRow, ParamID::sidechainFilter }, { &attackOff, ParamID::attackOff },
+        { &versionRow, ParamID::model }
     };
     for (const auto& [component, id] : controls)
     {
@@ -529,20 +597,64 @@ EditorView::EditorView (Urei1176Processor& p)
     }
     addAndMakeVisible (vu);
 
-    // Two columns of two rows (Ratio over Stereo, Meter over Attack Off); the rows of a column share one label column, so their options
+    // Two columns (Ratio, Stereo and S/C HPF; Meter, Attack Off and Version); the rows of a column share one label column, so their options
     // start together.
-    const int leftColumn = juce::jmax (ratioRow.labelTextWidth(), stereoRow.labelTextWidth()) + kLabelGap;
-    const int rightColumn = juce::jmax (meterRow.labelTextWidth(), attackOff.labelTextWidth()) + kLabelGap;
+    const int leftColumn = juce::jmax (ratioRow.labelTextWidth(), stereoRow.labelTextWidth(), sidechainRow.labelTextWidth()) + kLabelGap;
+    const int rightColumn = juce::jmax (meterRow.labelTextWidth(), attackOff.labelTextWidth(), versionRow.labelTextWidth()) + kLabelGap;
     ratioRow.setLabelColumn (leftColumn);
     stereoRow.setLabelColumn (leftColumn);
+    sidechainRow.setLabelColumn (leftColumn);
     meterRow.setLabelColumn (rightColumn);
     attackOff.setLabelColumn (rightColumn);
+    versionRow.setLabelColumn (rightColumn);
     attackOff.onLitChanged = [this] (bool lit) { attack->setDimmed (lit); };
     attack->setDimmed (attackOff.isLit());
 
+    versionAttachment.sendInitialUpdate();   // the palette, the subtitle and the default help of the saved version
     showHelpFor (nullptr);
     updateMeters();
     setSize (kWidth, kHeight);
+}
+
+void EditorView::versionChanged (int index)
+{
+    versionIndex = index;   // specAt clamps it
+    palette = paletteOverride != nullptr ? paletteOverride : &paletteFor (specAt (versionIndex));
+
+    applyPalette (*this, *palette);
+    for (auto* knob : { &input, &output, &release, &calibration, attack.get() })
+        knob->refreshColours();
+    if (onPaletteChanged)
+        onPaletteChanged();
+
+    // The default help is the version's; a control under the mouse (a click on REV) keeps its own.
+    auto* under = juce::Desktop::getInstance().getMainMouseSource().getComponentUnderMouse();
+    showHelpFor (under != nullptr && isParentOf (under) ? under : nullptr);
+    repaint();   // the subtitle may change while the colours do not
+}
+
+juce::String EditorView::subtitle() const
+{
+    const auto& spec = specAt (versionIndex);
+    const auto letter = juce::String::charToString (spec.name);
+    return "LN" + dot() + (isSilver (paletteFor (spec)) ? "SILVERFACE" : "BLACKFACE") + dot() + letter;
+}
+
+void EditorView::setPaletteOverride (const urei1176::Palette* p)
+{
+    paletteOverride = p;
+    versionChanged (versionIndex);
+}
+
+juce::StringArray EditorView::controlsWithoutHelp() const
+{
+    juce::StringArray missing;
+    for (auto* child : getChildren())
+        if (child != &vu && (! child->getProperties().contains (helpId) || child->getProperties()[helpId].toString().isEmpty()))
+            missing.add (child->getComponentID().isEmpty() ? "(unnamed)" : child->getComponentID());
+    if (! vu.getProperties().contains (helpId))
+        missing.add ("vu");
+    return missing;
 }
 
 void EditorView::updateMeters()
@@ -563,7 +675,7 @@ void EditorView::updateMeters()
 
 void EditorView::showHelpFor (juce::Component* component)
 {
-    juce::String title = kDefaultHelpTitle, text = kDefaultHelp;
+    juce::String title = kDefaultHelpTitle, text = defaultHelpFor (versionIndex);
 
     // The help belongs to the nearest ancestor that has any (a knob's slider has none itself).
     for (auto* c = component; c != nullptr && c != this; c = c->getParentComponent())
@@ -593,24 +705,24 @@ void EditorView::showHelpForParameter (const juce::String& paramId)
 
 void EditorView::paint (juce::Graphics& g)
 {
-    g.fillAll (Theme::background);
+    g.fillAll (col (*this, paletteBackground));
 
     // Title: the model, and quieter, which one.
     const auto title = Theme::titleFont (15.0f), subtitle = Theme::titleFont (11.0f);
     const float baseline = 33.0f;
-    g.setColour (Theme::pale);
+    g.setColour (col (*this, palettePale));
     g.setFont (title);
     g.drawSingleLineText ("1167", 24, (int) baseline);
-    g.setColour (Theme::label);
+    g.setColour (col (*this, paletteLabel));
     g.setFont (subtitle);
-    g.drawSingleLineText (juce::String::fromUTF8 ("LN \xC2\xB7 BLACKFACE REV F"), 24 + Theme::widthOf (title, "1167") + 12, (int) baseline);
+    g.drawSingleLineText (this->subtitle(), 24 + Theme::widthOf (title, "1167") + 12, (int) baseline);
 
     // Help, bottom left: what the control under the mouse does.
     auto help = helpArea;
-    g.setColour (Theme::pale);
+    g.setColour (col (*this, palettePale));
     g.setFont (Theme::labelFont());
     g.drawText (helpTitle, help.removeFromTop (16), juce::Justification::topLeft, false);
-    g.setColour (Theme::label);
+    g.setColour (col (*this, paletteLabel));
     g.setFont (Theme::bodyFont());
     g.drawFittedText (helpText, help, juce::Justification::topLeft, 3, 1.0f);
 }
@@ -627,26 +739,30 @@ void EditorView::resized()
     area.removeFromBottom (10);
     helpArea = area.removeFromBottom (54);
 
-    // Four option rows in two columns form one compact lane above the knob bank: Ratio over Stereo, Meter over Attack Off. To the right sit
+    // Six option rows in two columns form one compact lane above the knob bank: Ratio, Stereo and S/C HPF; Meter, Attack Off and Version. To the right sit
     // a two-thirds size VU face and the calibration control; the help follows immediately below the unit.
     auto unit = area;
     auto knobArea = unit.removeFromLeft (4 * knobCell);
 
-    const int leftWidth = juce::jmax (ratioRow.preferredWidth(), stereoRow.preferredWidth());
-    const int rightWidth = juce::jmax (meterRow.preferredWidth(), attackOff.preferredWidth());
+    const int leftWidth = juce::jmax (ratioRow.preferredWidth(), stereoRow.preferredWidth(), sidechainRow.preferredWidth());
+    const int rightWidth = juce::jmax (meterRow.preferredWidth(), attackOff.preferredWidth(), versionRow.preferredWidth());
     const int laneWidth = leftWidth + laneGap + rightWidth;
-    auto lane = juce::Rectangle<int> (knobArea.getCentreX() - laneWidth / 2, knobArea.getY(), laneWidth, 2 * kRowHeight + kRowGap);
+    auto lane = juce::Rectangle<int> (knobArea.getCentreX() - laneWidth / 2, knobArea.getY(), laneWidth, 3 * kRowHeight + 2 * kRowGap);
     auto left = lane.removeFromLeft (leftWidth);
     lane.removeFromLeft (laneGap);
     auto right = lane;
     ratioRow.setBounds (left.removeFromTop (kRowHeight).withWidth (ratioRow.preferredWidth()));
     left.removeFromTop (kRowGap);
-    stereoRow.setBounds (left.withWidth (stereoRow.preferredWidth()));
+    stereoRow.setBounds (left.removeFromTop (kRowHeight).withWidth (stereoRow.preferredWidth()));
+    left.removeFromTop (kRowGap);
+    sidechainRow.setBounds (left.withWidth (sidechainRow.preferredWidth()));
     meterRow.setBounds (right.removeFromTop (kRowHeight).withWidth (meterRow.preferredWidth()));
     right.removeFromTop (kRowGap);
-    attackOff.setBounds (right.withWidth (attackOff.preferredWidth()));
+    attackOff.setBounds (right.removeFromTop (kRowHeight).withWidth (attackOff.preferredWidth()));
+    right.removeFromTop (kRowGap);
+    versionRow.setBounds (right.removeFromTop (kRowHeight).withWidth (versionRow.preferredWidth()));
 
-    knobArea.removeFromTop (2 * kRowHeight + kRowGap + laneToKnobs);
+    knobArea.removeFromTop (3 * kRowHeight + 2 * kRowGap + laneToKnobs);
     for (auto* knob : { &input, &output, attack.get(), &release })
         knob->setBounds (knobArea.removeFromLeft (knobCell).withSizeKeepingCentre (knobCell, knob->preferredHeight()));
 
@@ -661,7 +777,15 @@ Urei1176Editor::Urei1176Editor (Urei1176Processor& p)
     : AudioProcessorEditor (p), owner (p), view (p)
 {
     setLookAndFeel (&lookAndFeel);
+    // The editor and its look-and-feel (the resize corner) take the view's palette too.
+    view.onPaletteChanged = [this]
+    {
+        applyPalette (*this, view.currentPalette());
+        applyPalette (lookAndFeel, view.currentPalette());
+        repaint();
+    };
     addAndMakeVisible (view);
+    view.onPaletteChanged();
 
     // Scales as a whole, 0.75x to 2x, keeping the design's aspect ratio.
     constexpr int w = EditorView::kWidth, h = EditorView::kHeight;
@@ -681,7 +805,7 @@ Urei1176Editor::~Urei1176Editor()
 
 void Urei1176Editor::paint (juce::Graphics& g)
 {
-    g.fillAll (Theme::background);
+    g.fillAll (findColour (paletteBackground));
 }
 
 void Urei1176Editor::resized()

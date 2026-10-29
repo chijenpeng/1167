@@ -5,11 +5,15 @@
 //
 //   editor.png        meter on GR, ratio 4
 //   editor-plus4.png  meter on +4, ratio All
+//   editor-J.png      revision J (silver face), as editor.png
 //
-//   plugin1167_snapshot [output-directory [extra-directory]]
+//   urei1176_snapshot [output-directory [extra-directory]] [--palette black|silver] [--preview directory]
 //
 // (default directory: docs; returns 1 if a check fails). With an extra directory it also writes editor-link.png
 // and editor-ms.png there, the editor in Link and in M/S with the Attack Off switch lit (not part of docs/).
+// --palette shows that face whatever the version (the silver face is J's).
+// --preview writes the review set (each version as it shows today, the silver face at 0.75x, 1x and 2x, the black face at the extremes, the
+// REV row's hover help, the VU in GR on both palettes) into that directory instead of docs/.
 
 #include "../Source/PluginEditor.h"
 
@@ -116,7 +120,7 @@ void checkParameters()
             check (slider->getValueFromText ("off") == 1.0 && slider->getValueFromText ("0.4") == 1.0 && slider->getValueFromText ("9") == 7.0
                        && std::abs (slider->getValueFromText ("3.5") - 3.5) < 1.0e-9,
                    "attack knob: typed text stays on the dial (off, 0.4 -> 1; 9 -> 7)");
-            check (same ((float) slider->getDoubleClickReturnValue(), urei1176::Range::attackDefault), "attack knob: double-click returns to 4");
+            check (same ((float) slider->getDoubleClickReturnValue(), Default::attack), "attack knob: double-click returns to 1 (the plug-in default)");
             // Old automation or a generic UI puts the parameter inside the OFF span: the knob shows 1.
             automate (*p, ParamID::attack, 0.0f);
             check (slider->getValue() == 1.0, "attack parameter in the OFF span: the knob shows 1");
@@ -214,11 +218,11 @@ void checkParameters()
            "state round trip");
 }
 
-/** A state as an earlier version saved it: without the parameters appended since (`stereo`, `attackOff`). */
+/** A state as an earlier version saved it: without the parameters appended since (`stereo`, `attackOff`, `sidechainFilter`, `model`). */
 juce::MemoryBlock oldState (Urei1176Processor& source)
 {
     auto xml = source.apvts.copyState().createXml();
-    for (const char* id : { ParamID::stereo, ParamID::attackOff })
+    for (const char* id : { ParamID::stereo, ParamID::attackOff, ParamID::sidechainFilter, ParamID::model })
         if (auto* child = xml->getChildByAttribute ("id", id))
             xml->removeChildElement (child, true);
     juce::MemoryBlock block;
@@ -239,15 +243,33 @@ void load (Urei1176Processor& p, const juce::MemoryBlock& state)
 
 void checkStateAndStereo()
 {
-    // Parameters appended after the first seven, in this order.
+    // Parameters appended after the first seven, in this order (stereo, attackOff, sidechainFilter, model).
     {
         auto p = makeProcessor();
         const auto& all = p->getParameters();
-        check (all.size() == 9 && dynamic_cast<juce::HostedAudioProcessorParameter*> (all[7]) != nullptr
+        check (all.size() == 11 && static_cast<juce::AudioProcessorParameterWithID*> (all[10])->paramID == ParamID::model && dynamic_cast<juce::HostedAudioProcessorParameter*> (all[7]) != nullptr
                    && static_cast<juce::AudioProcessorParameterWithID*> (all[7])->paramID == ParamID::stereo
                    && static_cast<juce::AudioProcessorParameterWithID*> (all[8])->paramID == ParamID::attackOff
+                   && static_cast<juce::AudioProcessorParameterWithID*> (all[9])->paramID == ParamID::sidechainFilter
                    && static_cast<juce::AudioProcessorParameterWithID*> (all[6])->paramID == ParamID::calibration,
-               "stereo and attackOff are appended after the first seven parameters");
+               "stereo, attackOff and sidechainFilter are appended after the first seven parameters");
+        auto* sc = dynamic_cast<juce::AudioParameterChoice*> (p->apvts.getParameter (ParamID::sidechainFilter));
+        check (sc != nullptr && sc->choices == juce::StringArray ({ "OFF", "30", "60", "105", "125", "185" }) && sc->getIndex() == 0
+                   && p->apvts.getParameter (ParamID::sidechainFilter)->getName (32) == "S/C HPF",
+               "S/C HPF: OFF, 30, 60, 105, 125, 185, default OFF");
+        for (int i = 0; i < 6; ++i)
+        {
+            set (*p, ParamID::sidechainFilter, (float) i);
+            runTone (*p, 0.01, 0.0f);
+            check (p->getChannel (0).controls().sidechainFilter == i && p->getChannel (1).controls().sidechainFilter == i,
+                   "S/C HPF choice " + juce::String (i) + " reaches both channels");
+        }
+        auto* model = dynamic_cast<juce::AudioParameterChoice*> (p->apvts.getParameter (ParamID::model));
+        check (model != nullptr && model->choices == juce::StringArray ({ "F", "G", "J" }) && model->getIndex() == 0
+                   && p->apvts.getParameter (ParamID::model)->getName (32) == "Version"
+                   && static_cast<juce::AudioProcessorParameterWithID*> (p->apvts.getParameter (ParamID::model))->paramID == "model"
+                   && static_cast<juce::AudioProcessorParameterWithID*> (p->apvts.getParameter (ParamID::model))->getVersionHint() == 1,
+               "model: Version F, G, J (D is deferred and would be appended), default F (index 0), parameter version hint 1");
         auto* stereo = dynamic_cast<juce::AudioParameterChoice*> (p->apvts.getParameter (ParamID::stereo));
         check (stereo != nullptr && stereo->choices == juce::StringArray ({ "Dual", "Link", "M/S" }) && stereo->getIndex() == 0
                    && p->apvts.getParameter (ParamID::stereo)->getName (32) == "Stereo",
@@ -266,14 +288,21 @@ void checkStateAndStereo()
         set (*live, ParamID::stereo, 1.0f);
         automate (*live, ParamID::attackOff, 1.0f);
         set (*live, ParamID::attack, 2.0f);
+        set (*live, ParamID::sidechainFilter, 5.0f);
         load (*live, notOff);
+        check (value (*live, ParamID::sidechainFilter) == 0.0f, "old state: S/C HPF is OFF although the live instance was at 185");
+        runTone (*live, 0.01, 0.0f);
+        check (live->getChannel (0).controls().sidechainFilter == 0 && live->getChannel (1).controls().sidechainFilter == 0,
+               "... which the channels follow");
         check (value (*live, ParamID::stereo) == 0.0f, "old state: stereo is Dual although the live instance was in Link");
         check (value (*live, ParamID::attackOff) == 0.0f && std::abs (value (*live, ParamID::attack) - 5.5f) < 1.0e-4f,
                "old state, Attack 5.5: attackOff is false although the live switch was on, Attack 5.5");
 
         set (*live, ParamID::stereo, 2.0f);
         automate (*live, ParamID::attackOff, 0.0f);
+        set (*live, ParamID::sidechainFilter, 3.0f);
         load (*live, inOffSpan);
+        check (value (*live, ParamID::sidechainFilter) == 0.0f, "old state: S/C HPF is OFF although the live instance was at 105");
         check (value (*live, ParamID::stereo) == 0.0f, "old state: stereo is Dual although the live instance was in M/S");
         check (same (value (*live, ParamID::attackOff), 1.0f) && same (value (*live, ParamID::attack), urei1176::Range::attackMin),
                "old state with Attack in its OFF span: attackOff is true and Attack is 1");
@@ -292,14 +321,17 @@ void checkStateAndStereo()
             automate (*a, ParamID::attackOff, off ? 1.0f : 0.0f);
             set (*a, ParamID::attack, 6.2f);
             set (*a, ParamID::ratio, 3.0f);
+            set (*a, ParamID::sidechainFilter, (float) (1 + mode * 2));
             juce::MemoryBlock block;
             a->getStateInformation (block);
             auto b = makeProcessor();
             set (*b, ParamID::stereo, (float) ((mode + 1) % 3));
             automate (*b, ParamID::attackOff, off ? 0.0f : 1.0f);
+            set (*b, ParamID::sidechainFilter, 0.0f);
             load (*b, block);
             check (same (value (*b, ParamID::stereo), (float) mode) && same (value (*b, ParamID::attackOff), off ? 1.0f : 0.0f)
-                       && std::abs (value (*b, ParamID::attack) - 6.2f) < 1.0e-4f && value (*b, ParamID::ratio) == 3.0f,
+                       && std::abs (value (*b, ParamID::attack) - 6.2f) < 1.0e-4f && same (value (*b, ParamID::ratio), 3.0f)
+                       && same (value (*b, ParamID::sidechainFilter), (float) (1 + mode * 2)),
                    "state round trip: stereo " + juce::String (mode) + ", attack off " + juce::String (off ? "on" : "off"));
         }
 
@@ -378,8 +410,220 @@ void checkStateAndStereo()
 }
 
 /** `helpFor`: a parameter ID whose hover help to show, as if the mouse were over its control. */
-bool writeSnapshot (Urei1176Editor& editor, const juce::File& file, const juce::String& helpFor = {})
+/** One block of 1 kHz on both channels, long enough (4096 samples, 85 ms) to hold a whole 20 ms version fade. */
+void runBlock (Urei1176Processor& p, int length = 4096)
 {
+    juce::AudioBuffer<float> buffer (2, length);
+    juce::MidiBuffer midi;
+    for (int i = 0; i < length; ++i)
+        for (int ch = 0; ch < 2; ++ch)
+            buffer.setSample (ch, i, 0.05f * (float) std::sin (2.0 * juce::MathConstants<double>::pi * 1000.0 * i / kRate));
+    p.processBlock (buffer, midi);
+}
+
+std::unique_ptr<Urei1176Processor> makeOfflineProcessor()
+{
+    auto p = makeProcessor();
+    p->setNonRealtime (true);
+    return p;
+}
+
+void checkVersionState()
+{
+    const auto version = [] (Urei1176Processor& p) { return juce::roundToInt (value (p, ParamID::model)); };
+
+    // (a) a state saved before `model` existed loads as F, on a fresh instance and on one that is set to J now
+    {
+        auto source = makeProcessor();
+        set (*source, ParamID::attack, 5.5f);
+        const auto old = oldState (*source);
+        auto fresh = makeProcessor();
+        load (*fresh, old);
+        check (version (*fresh) == 0, "state (a): a state without `model` loads as F on a fresh instance");
+        auto live = makeProcessor();
+        set (*live, ParamID::model, 2.0f);
+        check (version (*live) == 2, "... (the live instance is set to J)");
+        load (*live, old);
+        check (version (*live) == 0, "state (a): ... and as F on an instance that is set to J");
+        runBlock (*live);
+        check (live->getTargetVersion() == urei1176::Version::F, "... which the engine follows");
+    }
+
+    // (b) a round trip for each of the three versions
+    for (int v = 0; v < 3; ++v)
+    {
+        auto a = makeProcessor();
+        set (*a, ParamID::model, (float) v);
+        set (*a, ParamID::ratio, 2.0f);
+        juce::MemoryBlock block;
+        a->getStateInformation (block);
+        auto b = makeProcessor();
+        set (*b, ParamID::model, (float) ((v + 2) % 3));
+        load (*b, block);
+        check (version (*b) == v && value (*b, ParamID::ratio) == 2.0f, "state (b): round trip, version " + juce::String::charToString ("FGJ"[v]));
+    }
+
+    // (c) a state with J restored into an instance set to F lands on J; after one block (the settle is synchronous when offline) the
+    //     engine reports J, and the fade has started in that very block
+    {
+        auto source = makeProcessor();
+        set (*source, ParamID::model, 2.0f);
+        juce::MemoryBlock block;
+        source->getStateInformation (block);
+        auto target = makeOfflineProcessor();
+        set (*target, ParamID::model, 1.0f);
+        runBlock (*target);   // F fades to G within this block (offline: settled inline)
+        check (target->getActiveVersion() == urei1176::Version::G && ! target->isVersionFading(), "state (c): the target instance plays G");
+        load (*target, block);
+        check (version (*target) == 2, "state (c): the state sets the parameter to J");
+        runBlock (*target, 512);
+        check (target->isVersionFading() && target->getTargetVersion() == urei1176::Version::J,
+               "state (c): the first block after the load already fades towards J (the load settled it)");
+        runBlock (*target);
+        check (target->getActiveVersion() == urei1176::Version::J && ! target->isVersionFading(), "state (c): the engine then reports J");
+
+        // the same through a running instance with its settle worker: the load settles on this thread, the next block fades at once
+        auto live = makeProcessor();
+        set (*live, ParamID::model, 0.0f);
+        runBlock (*live, 512);
+        load (*live, block);
+        runBlock (*live, 512);
+        check (live->isVersionFading() || live->getActiveVersion() == urei1176::Version::J, "state (c): real time, the first block after a load fades at once");
+        for (int i = 0; i < 4; ++i) runBlock (*live, 512);
+        check (live->getActiveVersion() == urei1176::Version::J, "state (c): real time, the engine reaches J");
+    }
+
+    // (d) the earlier migration cases still pass: see checkStateAndStereo above (hadStereo, hadAttackOff, hadSidechainFilter)
+
+    // (e) an out-of-range index is clamped
+    for (const float raw : { 7.0f, -2.0f })
+    {
+        auto source = makeProcessor();
+        auto xml = source->apvts.copyState().createXml();
+        xml->getChildByAttribute ("id", ParamID::model)->setAttribute ("value", (double) raw);
+        juce::MemoryBlock block;
+        juce::AudioProcessor::copyXmlToBinary (*xml, block);
+        auto p = makeOfflineProcessor();
+        load (*p, block);
+        const int v = version (*p);
+        runBlock (*p);
+        runBlock (*p);
+        check (v == (raw > 0 ? 2 : 0) && p->getActiveVersion() == (raw > 0 ? urei1176::Version::J : urei1176::Version::F),
+               "state (e): index " + juce::String (raw, 0) + " is clamped to " + juce::String (v) + " and the engine follows");
+    }
+
+    // the state a real v0.2.0 build saved (tests/fixtures/v0.2.0_state.bin: nine parameters, no S/C HPF, no model)
+    {
+        juce::MemoryBlock block;
+        const juce::File fixture (juce::String (UREI1176_FIXTURE_DIR) + "/v0.2.0_state.bin");
+        check (fixture.loadFileAsData (block) && block.getSize() > 100, "fixture: tests/fixtures/v0.2.0_state.bin is there");
+        for (const int live : { 0, 2 })
+        {
+            auto p = makeOfflineProcessor();
+            set (*p, ParamID::model, (float) live);
+            set (*p, ParamID::sidechainFilter, 4.0f);
+            load (*p, block);
+            runBlock (*p);
+            runBlock (*p);
+            check (version (*p) == 0 && value (*p, ParamID::sidechainFilter) == 0.0f && p->getActiveVersion() == urei1176::Version::F
+                       && value (*p, ParamID::stereo) == 1.0f && same (value (*p, ParamID::attack), 5.5f) && value (*p, ParamID::ratio) == 3.0f
+                       && same (value (*p, ParamID::release), 3.0f)
+                       && same (value (*p, ParamID::calibration), 20.0f) && same (value (*p, ParamID::attackOff), 1.0f),
+                   juce::String ("fixture: a real v0.2.0 state loads as F with its own values, on an instance set to ") + (live == 2 ? "J" : "F"));
+        }
+    }
+
+    // a running instance whose Version is automated reaches the new engine through the worker, and no block is silent or non-finite
+    {
+        auto p = makeProcessor();
+        bool finiteOut = true;
+        int blocksToJ = 0;
+        automate (*p, ParamID::model, 1.0f);   // J (normalised 1.0)
+        for (; blocksToJ < 400 && (p->getActiveVersion() != urei1176::Version::J || p->isVersionFading()); ++blocksToJ)
+        {
+            juce::AudioBuffer<float> buffer (2, kBlock);
+            juce::MidiBuffer midi;
+            for (int i = 0; i < kBlock; ++i) { buffer.setSample (0, i, 0.05f * (float) std::sin (0.13 * i)); buffer.setSample (1, i, 0.05f * (float) std::sin (0.13 * i)); }
+            p->processBlock (buffer, midi);
+            finiteOut = finiteOut && std::isfinite (buffer.getMagnitude (0, 0, kBlock)) && buffer.getMagnitude (0, 0, kBlock) > 0.0f;
+            juce::Thread::sleep (1);
+        }
+        check (finiteOut && p->getActiveVersion() == urei1176::Version::J, "automating Version J on a running instance reaches J through the settle worker ("
+                                                                           + juce::String (blocksToJ) + " blocks)");
+    }
+}
+
+/** The editor's views and checks that need an editor: the REV row, the palette of each version, the subtitle and the help coverage. */
+void checkEditorVersion()
+{
+    const auto dot = juce::String::fromUTF8 (" \xC2\xB7 ");
+    const auto subtitleOf = [&] (const char* face, const char* letter) { return "LN" + dot + face + dot + letter; };
+
+    auto p = makeProcessor();
+    {
+        Urei1176Editor editor (*p);
+        const auto missing = editor.controlsWithoutHelp();
+        check (missing.isEmpty() && editor.getChildComponent (0)->findChildWithID (ParamID::model) != nullptr,
+               "editor: every control, the REV row included, has hover help" + (missing.isEmpty() ? juce::String() : " (missing: " + missing.joinIntoString (", ") + ")"));
+        check (editor.subtitle() == subtitleOf ("BLACKFACE", "F") && &editor.currentPalette() == &urei1176::blackFace,
+               "editor, F: black face, subtitle LN . BLACKFACE . F");
+
+        // F and G show the black face, J the silver face.
+        for (int v = 0; v < 3; ++v)
+        {
+            set (*p, ParamID::model, (float) v);
+            const auto letter = juce::String::charToString ("FGJ"[v]);
+            const bool silver = v == 2;
+            check (&editor.currentPalette() == (silver ? &urei1176::silverFace : &urei1176::blackFace)
+                       && editor.subtitle() == subtitleOf (silver ? "SILVERFACE" : "BLACKFACE", letter.toRawUTF8()),
+                   "editor, version " + letter + ": " + editor.currentPalette().name + ", subtitle " + editor.subtitle());
+        }
+
+        // The palette follows placeholderOfF: J is silver the moment its spec is real, D and G stay black.
+        for (const auto version : { urei1176::Version::D, urei1176::Version::F, urei1176::Version::G, urei1176::Version::J })
+        {
+            auto spec = urei1176::specFor (version);
+            spec.placeholderOfF = true;
+            const bool placeholderBlack = &paletteFor (spec) == &urei1176::blackFace;
+            spec.placeholderOfF = false;
+            const bool realOk = &paletteFor (spec) == (version == urei1176::Version::J ? &urei1176::silverFace : &urei1176::blackFace);
+            check (placeholderBlack && realOk, juce::String ("palette for ") + spec.name + ": black while a placeholder, " + (version == urei1176::Version::J ? "silver" : "black") + " once real");
+        }
+
+        // An override shows the other face and survives a version change; colours belong to the editor instance, not to a global.
+        set (*p, ParamID::model, 1.0f);
+        editor.setPaletteOverride (&urei1176::silverFace);
+        Urei1176Editor other (*p);
+        check (&editor.currentPalette() == &urei1176::silverFace && editor.findColour (paletteBackground) == juce::Colour (urei1176::silverFace.background)
+                   && other.findColour (paletteBackground) == juce::Colour (urei1176::blackFace.background),
+               "palette override: this editor silver, a second editor on the same plug-in (G) still black");
+        set (*p, ParamID::model, 0.0f);
+        check (&editor.currentPalette() == &urei1176::silverFace, "palette override survives a version change");
+        editor.setPaletteOverride (nullptr);
+        check (&editor.currentPalette() == &urei1176::blackFace, "palette override cleared: follows the version again");
+        set (*p, ParamID::model, 2.0f);
+        check (&editor.currentPalette() == &urei1176::silverFace && &other.currentPalette() == &urei1176::silverFace, "J: both editors on the plug-in show the silver face");
+    }
+
+    // An editor opened on a state saved with J shows J; a state from before `model` existed shows F.
+    {
+        auto source = makeProcessor();
+        set (*source, ParamID::model, 2.0f);
+        juce::MemoryBlock block;
+        source->getStateInformation (block);
+        auto target = makeProcessor();
+        load (*target, block);
+        Urei1176Editor editor (*target);
+        check (editor.subtitle() == subtitleOf ("SILVERFACE", "J"), "editor opened on a J state: silver face, subtitle LN . SILVERFACE . J");
+        load (*target, oldState (*source));
+        check (editor.subtitle() == subtitleOf ("BLACKFACE", "F"), "editor on an old state without `model`: F, black face");
+    }
+}
+
+bool writeSnapshot (Urei1176Editor& editor, const juce::File& file, const juce::String& helpFor = {}, double scale = 0.0)
+{
+    if (scale > 0.0)
+        editor.setSize (juce::roundToInt (EditorView::kWidth * scale), juce::roundToInt (EditorView::kHeight * scale));
     editor.updateMeters();
     juce::MessageManager::getInstance()->runDispatchLoopUntil (100);   // let the editor's timer run too
     if (helpFor.isNotEmpty())
@@ -398,6 +642,56 @@ void printMeters (const Urei1176Processor& p)
     std::printf ("  needle %.2f / %.2f dB, gain cell reduction %.2f / %.2f dB\n",
                  m.needleDb[0], m.needleDb[1], m.gainReductionDb[0], m.gainReductionDb[1]);
 }
+/** The review set (--preview): each built version at 1x, J (the silver face) at the scale extremes, with the VU at about 10 dB of reduction and with the
+    REV row's hover help, and the forced faces for comparison. Every processor renders offline so that the version switch settles inline: the set is
+    reproducible. */
+bool writePreviews (const juce::File& directory)
+{
+    directory.createDirectory();
+    bool ok = true;
+    const float amplitude = juce::Decibels::decibelsToGain (-26.0f);
+
+    const auto render = [&] (int version, const urei1176::Palette* palette, const char* name, double scale, const juce::String& helpFor,
+                             float toneDb, int meter)
+    {
+        auto q = makeProcessor();
+        q->setNonRealtime (true);
+        set (*q, ParamID::input, 0.75f);
+        set (*q, ParamID::model, (float) version);
+        set (*q, ParamID::meter, (float) meter);
+        runTone (*q, 1.5, juce::Decibels::decibelsToGain (toneDb));
+        Urei1176Editor editor (*q);
+        editor.setPaletteOverride (palette);
+        printMeters (*q);
+        return writeSnapshot (editor, directory.getChildFile (name), helpFor, scale);
+    };
+    const int gr = (int) urei1176::MeterMode::gainReduction;
+    const float toneDb = juce::Decibels::gainToDecibels (amplitude);
+
+    // each version as it shows today
+    ok = render (0, nullptr, "version-F.png", 1.0, {}, toneDb, gr) && ok;
+    ok = render (1, nullptr, "version-G.png", 1.0, {}, toneDb, gr) && ok;
+    ok = render (2, nullptr, "version-J.png", 1.0, {}, toneDb, gr) && ok;
+    // J's silver face at 0.75x and 2x
+    ok = render (2, nullptr, "J-0.75x.png", 0.75, {}, toneDb, gr) && ok;
+    ok = render (2, nullptr, "J-2x.png", 2.0, {}, toneDb, gr) && ok;
+    // the VU in GR at about 10 dB of reduction
+    ok = render (2, nullptr, "J-vu-gr10.png", 1.0, {}, -22.0f, gr) && ok;
+    ok = render (0, nullptr, "F-vu-gr10.png", 1.0, {}, -22.0f, gr) && ok;
+    // the REV row's hover help on the silver face and on the black face
+    ok = render (2, nullptr, "J-hover-rev.png", 1.0, ParamID::model, toneDb, gr) && ok;
+    ok = render (0, nullptr, "F-hover-rev.png", 1.0, ParamID::model, toneDb, gr) && ok;
+    // the Attack and Release knobs' hover help (the longest knob texts) on both faces
+    ok = render (0, nullptr, "F-hover-attack.png", 1.0, ParamID::attack, toneDb, gr) && ok;
+    ok = render (0, nullptr, "F-hover-release.png", 1.0, ParamID::release, toneDb, gr) && ok;
+    ok = render (2, nullptr, "J-hover-attack.png", 1.0, ParamID::attack, toneDb, gr) && ok;
+    ok = render (2, nullptr, "J-hover-release.png", 1.0, ParamID::release, toneDb, gr) && ok;
+    // the black face forced on J, and the silver face forced on F, for comparison
+    ok = render (2, &urei1176::blackFace, "J-forced-black.png", 1.0, {}, toneDb, gr) && ok;
+    ok = render (0, &urei1176::silverFace, "F-forced-silver.png", 1.0, {}, toneDb, gr) && ok;
+    return ok;
+}
+
 } // namespace
 
 int main (int argc, char** argv)
@@ -410,11 +704,31 @@ int main (int argc, char** argv)
         std::fprintf (stderr, "failed to disable stdout buffering\n");
         return 1;
     }
-    const auto directory = juce::File::getCurrentWorkingDirectory().getChildFile (argc > 1 ? argv[1] : "docs");
+    // Positional arguments (output directory, extra directory) and the options.
+    std::vector<const char*> positional;
+    const urei1176::Palette* paletteOverride = nullptr;
+    const char* previewDirectory = nullptr;
+    for (int i = 1; i < argc; ++i)
+    {
+        const juce::String arg (argv[i]);
+        if (arg == "--palette" && i + 1 < argc)
+        {
+            const juce::String name (argv[++i]);
+            paletteOverride = name == "silver" ? &urei1176::silverFace : (name == "black" ? &urei1176::blackFace : nullptr);
+            if (paletteOverride == nullptr) { std::fprintf (stderr, "--palette: black or silver\n"); return 1; }
+        }
+        else if (arg == "--preview" && i + 1 < argc)
+            previewDirectory = argv[++i];
+        else
+            positional.push_back (argv[i]);
+    }
+    const auto directory = juce::File::getCurrentWorkingDirectory().getChildFile (positional.size() > 0 ? positional[0] : "docs");
     directory.createDirectory();
 
     checkParameters();
     checkStateAndStereo();
+    checkVersionState();
+    checkEditorVersion();
 
     // Input at 0.75 ("12"), ratio 4, meter on GR; a 1 kHz tone at -26 dBFS for 1.5 s: about 7 dB
     // of reduction, the needle near -6. (At -12 dBFS it is 17 dB and the needle sits on the stop.)
@@ -430,6 +744,7 @@ int main (int argc, char** argv)
     bool ok = true;
     {
         Urei1176Editor editor (*p);
+        editor.setPaletteOverride (paletteOverride);
         ok = writeSnapshot (editor, directory.getChildFile ("editor.png")) && ok;
 
         // The same tone with the meter on +4, every ratio button in and Output at "18", so the
@@ -443,16 +758,34 @@ int main (int argc, char** argv)
         ok = writeSnapshot (editor, directory.getChildFile ("editor-plus4.png"), ParamID::meter) && ok;
     }
 
-    if (argc > 2)
+    {
+        // J (docs/editor-J.png): the same tone as editor.png on the silver face. The processor renders offline so that the switch to J settles inline
+        // (no worker thread): the image is byte-identical from run to run.
+        auto j = makeProcessor();
+        j->setNonRealtime (true);
+        set (*j, ParamID::input, 0.75f);
+        set (*j, ParamID::ratio, (float) urei1176::Ratio::r4);
+        set (*j, ParamID::meter, (float) urei1176::MeterMode::gainReduction);
+        set (*j, ParamID::model, 2.0f);
+        runTone (*j, 1.5, amplitude);
+        std::printf ("GR, ratio 4, J:\n");
+        printMeters (*j);
+        Urei1176Editor editor (*j);
+        editor.setPaletteOverride (paletteOverride);
+        ok = writeSnapshot (editor, directory.getChildFile ("editor-J.png")) && ok;
+    }
+
+    if (positional.size() > 1)
     {
         // Link, then M/S with the Attack Off switch lit and the hover help on the Stereo row: the same tone, two different amplitudes per side.
-        const auto extra = juce::File::getCurrentWorkingDirectory().getChildFile (argv[2]);
+        const auto extra = juce::File::getCurrentWorkingDirectory().getChildFile (positional[1]);
         extra.createDirectory();
         auto q = makeProcessor();
         set (*q, ParamID::input, 0.75f);
         set (*q, ParamID::stereo, 1.0f);
         {
             Urei1176Editor editor (*q);
+            editor.setPaletteOverride (paletteOverride);
             runTone (*q, 1.5, amplitude);
             ok = writeSnapshot (editor, extra.getChildFile ("editor-link.png"), ParamID::stereo) && ok;
         }
@@ -460,14 +793,26 @@ int main (int argc, char** argv)
         automate (*q, ParamID::attackOff, 1.0f);
         {
             Urei1176Editor editor (*q);
+            editor.setPaletteOverride (paletteOverride);
             runTone (*q, 0.5, amplitude);
             ok = writeSnapshot (editor, extra.getChildFile ("editor-ms.png"), ParamID::attackOff) && ok;
+        }
+        // The S/C HPF at 185 Hz, with its hover help.
+        set (*q, ParamID::stereo, 0.0f);
+        automate (*q, ParamID::attackOff, 0.0f);
+        set (*q, ParamID::sidechainFilter, 5.0f);
+        {
+            Urei1176Editor editor (*q);
+            editor.setPaletteOverride (paletteOverride);
+            runTone (*q, 0.5, amplitude);
+            ok = writeSnapshot (editor, extra.getChildFile ("editor-sc.png"), ParamID::sidechainFilter) && ok;
         }
         auto r = makeProcessor();
         set (*r, ParamID::input, 0.75f);
         set (*r, ParamID::stereo, 2.0f);
         {
             Urei1176Editor editor (*r);
+            editor.setPaletteOverride (paletteOverride);
             // M/S with the right channel at a quarter of the left, in phase: M carries most of it, S a little
             juce::AudioBuffer<float> buffer (2, kBlock);
             juce::MidiBuffer midi;
@@ -485,6 +830,9 @@ int main (int argc, char** argv)
             ok = writeSnapshot (editor, extra.getChildFile ("editor-ms-readout.png"), ParamID::stereo) && ok;
         }
     }
+
+    if (previewDirectory != nullptr)
+        ok = writePreviews (juce::File::getCurrentWorkingDirectory().getChildFile (previewDirectory)) && ok;
 
     std::printf (failures == 0 ? "all checks passed\n" : "%d check(s) failed\n", failures);
     return ok && failures == 0 ? 0 : 1;

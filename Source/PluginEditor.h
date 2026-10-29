@@ -1,6 +1,23 @@
 #pragma once
 
 #include "PluginProcessor.h"
+#include "Palette.h"
+#include "dsp/Versions.h"
+
+/** The editor's colours are looked up with `findColour (id, true)`, so each editor instance carries its own palette (two 1167s in one host
+    may show different versions): the ids are set on the editor and its view by `applyPalette`, never read from a global. */
+enum PaletteColourId
+{
+    paletteBackground = 0x11670001, paletteField, paletteLabel, palettePale, paletteDiscHover, paletteText, paletteAccent,
+    paletteVuFace, paletteVuHood, paletteVuInk, paletteVuNeedle, paletteRedZone
+};
+
+/** Sets every palette colour on `target`. */
+void applyPalette (juce::Component& target, const urei1176::Palette&);
+void applyPalette (juce::LookAndFeel& target, const urei1176::Palette&);
+
+/** The palette a version shows: the silver face for J, the black face for F and G. A placeholder of F (D, not exposed) shows F's face. */
+const urei1176::Palette& paletteFor (const urei1176::VersionSpec&) noexcept;
 
 /** The embedded typefaces. Shared by all open editors and released with the last one, so
     nothing outlives the host's JUCE shutdown. */
@@ -17,6 +34,7 @@ public:
     void drawRotarySlider (juce::Graphics&, int x, int y, int width, int height, float position,
                            float startAngle, float endAngle, juce::Slider&) override;
     void drawCornerResizer (juce::Graphics&, int w, int h, bool isMouseOver, bool isMouseDragging) override;
+    FlatLookAndFeel();
 };
 
 /** A flat disc with a dot, its name above and its value below. Double-click the disc for the
@@ -33,6 +51,8 @@ public:
 
     /** Draws the knob quieter (it still turns): its parameter has no effect at the moment. */
     void setDimmed (bool shouldDim);
+    /** Re-applies the value editor's colours (a palette swap; called by the view once the knob is in it). */
+    void refreshColours();
 
     void paint (juce::Graphics&) override;
     void resized() override;
@@ -138,7 +158,7 @@ private:
 class EditorView final : public juce::Component
 {
 public:
-    static constexpr int kWidth = 760, kHeight = 286;
+    static constexpr int kWidth = 760, kHeight = 306;
 
     explicit EditorView (Urei1176Processor&);
 
@@ -152,13 +172,30 @@ public:
     /** Shows the help of the control for this parameter ID. */
     void showHelpForParameter (const juce::String& paramId);
 
+    /** The palette that shows now, and the subtitle and default help of the selected version. */
+    const urei1176::Palette& currentPalette() const noexcept { return *palette; }
+    juce::String subtitle() const;
+    /** For the offline snapshot tool: shows this palette whatever the version (nullptr: follow the version again). */
+    void setPaletteOverride (const urei1176::Palette*);
+    /** Component IDs of the controls that have no hover help. */
+    juce::StringArray controlsWithoutHelp() const;
+    /** Called after the palette changed, so the owner can colour itself the same way. */
+    std::function<void()> onPaletteChanged;
+
 private:
+    void versionChanged (int index);
+
     Urei1176Processor& processor;
     Knob input, output, release, calibration;
     std::unique_ptr<Knob> attack;
-    OptionRow ratioRow, meterRow, stereoRow;
+    OptionRow ratioRow, meterRow, stereoRow, sidechainRow, versionRow;
     AttackOffSwitch attackOff;
     VuMeter vu;
+
+    int versionIndex = 0;   // the Version choice index: F
+    const urei1176::Palette* palette = &urei1176::blackFace;
+    const urei1176::Palette* paletteOverride = nullptr;
+    juce::ParameterAttachment versionAttachment;
 
     juce::String helpTitle, helpText;
     juce::Rectangle<int> helpArea;
@@ -177,6 +214,10 @@ public:
     /** For the offline snapshot tool, which has no host message loop or mouse. */
     void updateMeters() { view.updateMeters(); }
     void showHelpForParameter (const juce::String& paramId) { view.showHelpForParameter (paramId); }
+    const urei1176::Palette& currentPalette() const noexcept { return view.currentPalette(); }
+    juce::String subtitle() const { return view.subtitle(); }
+    void setPaletteOverride (const urei1176::Palette* p) { view.setPaletteOverride (p); }
+    juce::StringArray controlsWithoutHelp() const { return view.controlsWithoutHelp(); }
 
 private:
     void timerCallback() override;

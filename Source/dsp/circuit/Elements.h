@@ -17,7 +17,7 @@ struct PortRef
     int netIndex = -1;   // position of the network in the circuit, for ordering
 };
 
-/** One non-linear device: a tube, a diode pair, an op-amp, a transistor.
+/** One non-linear device: a diode pair, a JFET, a bipolar transistor.
 
     The device has m unknown currents u. The current it injects into each of its ports is a
     linear combination C·u. Its model is evaluated on nV "model voltages", each a linear
@@ -61,15 +61,6 @@ public:
         return (vCrit + vKnee * std::log (1.0 + (vNew - vCrit) / vKnee)) - vOld;
     }
     static Real limitFlat (Real delta, Real lim) noexcept { return delta > lim ? lim : (delta < -lim ? -lim : delta); }
-    /** A plate voltage: capped, and never collapsing past a quarter of its value in one step,
-        so a tube is not thrown from its knee into cut-off (where the model has no slope). */
-    static Real limitPlate (Real vOld, Real delta, Real lim) noexcept
-    {
-        delta = limitFlat (delta, lim);
-        if (vOld > 0.0 && delta < -0.75 * vOld)
-            delta = -0.75 * vOld;
-        return delta;
-    }
 
     std::vector<PortRef> ports;
 };
@@ -251,7 +242,7 @@ private:
         kneeR = nR * vt;
         // A direction whose diode never carries the guard current before the exponential turns
         // linear (a blocked direction, saturation current ~0) has no junction to guard: guarded,
-        // a clamp diode reverse-biased by hundreds of volts crawled after its plate.
+        // a clamp diode reverse-biased by hundreds of volts crawled after the node it clamps.
         constexpr Real eKnee = 2.35e17;   // limitedExp's exp (40)
         freeF = fwd.is * scale * eKnee < kJunctionGuardAmps;
         freeR = rev.is * scale * eKnee < kJunctionGuardAmps;

@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="UTF-8"?>
+
+<Urei1176>
+  <PARAM id="attack" value="5.5"/>
+  <PARAM id="attackOff" value="1.0"/>
+  <PARAM id="calibration" value="20.0"/>
+  <PARAM id="input" value="0.6200000047683716"/>
+  <PARAM id="meter" value="2.0"/>
+  <PARAM id="output" value="0.4099999964237213"/>
+  <PARAM id="ratio" value="3.0"/>
+  <PARAM id="release" value="3.0"/>
+  <PARAM id="stereo" value="1.0"/>
+</Urei1176>

@@ -1,5 +1,50 @@
 # 1167 release notes
 
+## v0.3.0
+
+Three selectable revisions, a detector high-pass filter and new Attack and Release defaults.
+
+- **Rev F, G and J (new parameter `model`, host name Version, default F).**
+  - **F** is the circuit of v0.2.x, bit-identical with the S/C HPF off.
+  - **G** (provenance: Circuit, with Approximation where the sheets are silent): a 5532 bridging input
+    with a 10 k Input pot in place of the bridged-T pad and T1, R84 (1 k) across T2, a 30.3 V supply
+    and its own preamp and line-amp values. Its Input dial reads as F's (Approximation).
+  - **J** (Circuit, with Approximation): the sheet titled H as revised through J. G's 5532 input,
+    supply and preamp, R33 11 k and C13 100 uF in the line amp, and output transformer 163-12614 with
+    no winding data (F's data with both winding resistances doubled: Approximation).
+  - **Level trims** (Custom, a plug-in choice; the hardware has none): G and J are trimmed so that
+    their thresholds and their gain at 24 / 24 match F's.
+  - **Panels:** black face for F and G, silver face for J, with colours chosen for the plug-in.
+  - **Switching** crossfades over 20 ms, the new engine starting from the old one's gain reduction.
+  - Revision D is not included: there is no measured data for its output transformer and no printed
+    class A bias.
+- **S/C HPF (new parameter `sidechainFilter`).** OFF, 30, 60, 105, 125 or 185 Hz, first order, on the
+  detector only (provenance: Custom; the 1176 has no such filter). OFF is exactly the unfiltered
+  detector. This control was not in v0.2.1.
+- **New defaults.** A new instance starts with Attack at 1 (the slowest) and Release at 7 (the
+  fastest). Saved sessions keep their own values.
+- **Help text.** The Attack and Release hover help now give the model's measured times with the
+  definition used, beside the manual's figures.
+- **Editor.** The option rows are now STEREO, ATTACK OFF, S/C HPF and REV; the face colours follow the
+  selected revision. A new image, `docs/editor-J.png`, shows revision J.
+- **Known limit.** At 4:1 with a very hot input on G and J (+22 to +26 dBu at the plug-in's input),
+  the reference circuit has -53 to -61 dBc of third harmonic from Q1's gate junctions that the fast
+  engine does not produce. On F the line amplifier clips first at those levels, and the fast engine
+  matches the reference there.
+- **CPU (Apple M3, hosted stereo VST3, 48 kHz, 512-sample buffer):** F about 118x real time, G about
+  112x. J was not timed on the wall clock; it is about the same as G (same instruction count).
+- **Compatibility.** Same identity (`com.c0dypeng.legacy1167`, `Cdpg` / `U167`). Two parameters are
+  appended (`sidechainFilter`, `model`); existing parameter IDs, order and ranges are unchanged.
+  Sessions saved by v0.2.x load as revision F with the S/C HPF off and their own Attack, Release and
+  other values, and with F selected and the S/C HPF off the engine is bit-identical to v0.2.x at the same settings. Sessions saved by v0.1.0
+  keep the v0.2.0 migration (Dual; Attack OFF becomes the Attack Off switch with Attack at 1).
+  Latency is 0 samples.
+- macOS Universal: AU and VST3, arm64 + x86_64, ad-hoc signed, not notarized.
+- Windows x64: VST3, built natively with MSVC on windows-2022, unsigned. CTest result to be added
+  after the Windows run.
+- macOS CTest 4/4 (`plugin1167_test`, `plugin1167_test_fast`, `plugin1167_stereo_test`,
+  `plugin1167_palette_contrast`).
+
 ## v0.2.1
 
 - **Meter readout removed.** The numeric gain-reduction readout under the VU meter (`GR ... dB`, or

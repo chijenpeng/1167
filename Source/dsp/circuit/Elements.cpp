@@ -80,37 +80,6 @@ namespace
         }
     }
 
-    /** Fast path for the PI + output-tube Jacobian. Most solves never need a row exchange;
-        return false if a pivot becomes unusable so the caller can retry the same system
-        with the regular partial-pivoting solver. */
-    template <int n>
-    inline bool solveFixedUnpivoted (Real* a, Real* b) noexcept
-    {
-        for (int k = 0; k < n; ++k)
-        {
-            const Real d = a[k * n + k];
-            if (! std::isfinite (d) || std::abs (d) < 1.0e-12)
-                return false;
-            const Real inv = 1.0 / d;
-            for (int i = k + 1; i < n; ++i)
-            {
-                const Real f = a[i * n + k] * inv;
-                for (int j = k + 1; j < n; ++j) a[i * n + j] -= f * a[k * n + j];
-                b[i] -= f * b[k];
-            }
-            a[k * n + k] = inv;
-        }
-        for (int i = n - 1; i >= 0; --i)
-        {
-            Real s = b[i];
-            for (int j = i + 1; j < n; ++j) s -= a[i * n + j] * b[j];
-            b[i] = s * a[i * n + i];
-            if (! std::isfinite (b[i]))
-                return false;
-        }
-        return true;
-    }
-
     /** The Newton groups' dense solve (urei1176 change, see docs): LU with partial pivoting in
         place, for a size fixed at compile time (N > 0; the loops then unroll and vectorise) or
         given at run time (N == 0). Same pivot choice and tiny-pivot guard as solveSmall; the
@@ -471,8 +440,8 @@ bool DeviceGroup::iterate (Real limitScale, int iterations) noexcept
             Real dv = 0.0;
             for (int j = 0; j < m; ++j)
                 dv += M[(size_t) i * (size_t) m + (size_t) j] * du[(size_t) j];
-            // Convergence is judged relative to the size of the voltage: a plate at 400 V
-            // does not need the same absolute precision as a grid at -1 V.
+            // Convergence is judged relative to the size of the voltage: a node at 30 V
+            // does not need the same absolute precision as a gate at -1 V.
             biggest = std::max (biggest, std::abs (dv) / std::max (1.0, std::abs (vm[(size_t) i]) * 0.05));
             if (dv == 0.0) continue;
             const Real allowed = voltageOwner[(size_t) i].first->limitStep (voltageOwner[(size_t) i].second, vm[(size_t) i], dv * limitScale);
@@ -485,7 +454,7 @@ bool DeviceGroup::iterate (Real limitScale, int iterations) noexcept
         if (biggest < toleranceVolts)
         {
             // Converged; the step just computed is free and leaves only a quadratic error.
-            // (Returning without it left up to the tolerance at every plate, which the stages
+            // (Returning without it left up to the tolerance at every node, which the stages
             // downstream amplify into audible hash.)
             for (int j = 0; j < m; ++j)
                 u[(size_t) j] += du[(size_t) j];

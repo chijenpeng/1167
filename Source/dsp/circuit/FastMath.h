@@ -3,9 +3,6 @@
 #include <cmath>
 #include <cstdint>
 #include <cstring>
-#include <memory>
-#include <mutex>
-#include <vector>
 
 namespace ar::circuit::fast
 {
@@ -41,8 +38,6 @@ inline double log (double x) noexcept
     return s + (double) e * 0.6931471805599453;
 }
 
-inline double pow (double x, double y) noexcept { return x <= 0.0 ? 0.0 : exp (y * log (x)); }
-
 /** softplus and its derivative (the logistic sigmoid), exactly. */
 inline void softplusSigmoidExact (double x, double& sp, double& sg) noexcept
 {
@@ -53,8 +48,8 @@ inline void softplusSigmoidExact (double x, double& sp, double& sg) noexcept
     sg = e / d;
 }
 
-/** The same from a table with linear interpolation (64 points per unit on [-20, 40]): the
-    tube models call this several times per Newton iteration and it is their main cost. */
+/** The same from a table with linear interpolation (64 points per unit on [-20, 40]): the JFET
+    models (JfetDevice, the fast engine's Q1) and the fast engine's rectifier call it in their Newton iterations. */
 struct SoftplusTable
 {
     static constexpr double lo = -20.0, hi = 40.0;
@@ -81,62 +76,4 @@ inline void softplusSigmoid (double x, double& sp, double& sg) noexcept
     sg = T.sg[i] + t * (T.sg[i + 1] - T.sg[i]);
 }
 
-/** x^y for a fixed exponent y (the Koren models' ex - 1), tabulated: fine steps below 4 where
-    the curvature is, coarser above. Exact below 0.02 and above 64. */
-class PowTable
-{
-public:
-    static const PowTable& get (double exponent)
-    {
-        static std::mutex mutex;
-        static std::vector<std::unique_ptr<PowTable>> tables;
-        std::lock_guard<std::mutex> lock (mutex);
-        for (const auto& t : tables)
-            if (t->y == exponent)
-                return *t;
-        tables.push_back (std::unique_ptr<PowTable> (new PowTable (exponent)));
-        return *tables.back();
-    }
-    double eval (double x) const noexcept
-    {
-        if (x < 0.02 || x >= 64.0)
-            return pow (x, y);
-        if (x < 4.0)
-        {
-            const double f = x * 256.0;
-            const int i = (int) f;
-            const double t = f - (double) i;
-            return fine[i] + t * (fine[i + 1] - fine[i]);
-        }
-        const double f = (x - 4.0) * 32.0;
-        const int i = (int) f;
-        const double t = f - (double) i;
-        return coarse[i] + t * (coarse[i + 1] - coarse[i]);
-    }
-    double exponent() const noexcept { return y; }
-private:
-    explicit PowTable (double exponent) : y (exponent)
-    {
-        for (int i = 0; i < 4 * 256 + 2; ++i) fine.push_back (std::pow ((double) i / 256.0, y));
-        for (int i = 0; i < 60 * 32 + 2; ++i) coarse.push_back (std::pow (4.0 + (double) i / 32.0, y));
-    }
-    double y;
-    std::vector<double> fine, coarse;
-};
-
-inline double softplus (double x) noexcept { double sp, sg; softplusSigmoid (x, sp, sg); return sp; }
-inline double sigmoid (double x) noexcept  { double sp, sg; softplusSigmoid (x, sp, sg); return sg; }
-
-/** atan(x) to ~1e-6 absolute, for the pentode plate-knee term. */
-inline double atan (double x) noexcept
-{
-    const bool neg = x < 0.0;
-    if (neg) x = -x;
-    const bool inv = x > 1.0;
-    if (inv) x = 1.0 / x;
-    const double x2 = x * x;
-    double r = x * (0.99997726 + x2 * (-0.33262347 + x2 * (0.19354346 + x2 * (-0.11643287 + x2 * (0.05265332 - x2 * 0.01172120)))));
-    if (inv) r = 1.5707963267948966 - r;
-    return neg ? -r : r;
-}
 } // namespace ar::circuit::fast

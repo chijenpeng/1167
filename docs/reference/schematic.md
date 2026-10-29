@@ -53,13 +53,13 @@ Sources of the values:
 | R32, R33, C13 | 1 kΩ, 4.7 kΩ, 2200 pF | Feedback return: R32 to ground, R33 + C13 a small HF shelf (+0.5 dB at 15-20 kHz) | F (rev K: 2 k, 11 k, 100 µF) |
 | R34 | 3.9 kΩ | Feedback from the amp output (before C15): gain 1 + 3.9k / 1k = 4.9 (13.8 dB) | F (rev K: 4.3 k) |
 | Q6, Q7 | 2N5087 | PNP Darlington driver; R35 10 kΩ, R36 100 Ω | F = K |
-| C12, R37 | 12 pF, 1 kΩ | Compensation, Q5 collector to Q9 base | F/G read "_2 PF"; rev K log "REV T PER ECN 0090: C12 WAS 12PF NOW 10PF" |
+| C12, R37 | 12 pF, 1 kΩ | Compensation, Q5 collector to Q9 base | F/G read "_2 PF" (the F scan lacks the leading digit: 12 pF is probable, 22 pF the alternative, negligible effect on the model); rev K log "REV T PER ECN 0090: C12 WAS 12PF NOW 10PF" |
 | CR1, CR2 | 1N4003 | Output-stage bias | F = K |
 | R38, R39, C14 | 1.2 kΩ, 1.2 kΩ, 22 µF | Bias string, bootstrapped by C14 | F = K |
 | C29 | 47 pF | Q9 base to ground | F = K |
 | Q8, Q9 | MPS-U05, MPS-U55 | Class AB output pair, R40 / R41 4.3 Ω | F = K |
 | C15 | 470 µF 40 V | To T2's primary | F = K |
-| T2 | B11148 (drawn "311148"), both primaries (RED-BRN ‖ YEL-ORG) and both secondaries (GRN-BLU ‖ VIO-GRY) in parallel; nothing across the secondary | Output transformer | F; rev G: 16-11148; rev H on: 163-12614 with R84 1 k across the secondary |
+| T2 | B11148 (drawn "311148"), both primaries (RED-BRN ‖ YEL-ORG) and both secondaries (GRN-BLU ‖ VIO-GRY) in parallel; nothing across the secondary | Output transformer | F; rev G: 16-11148; rev H on: 163-12614 with R84 1 k across the secondary. Rev F ties RED+YEL to C15, BRN+ORG to ground, GRN+VIO to X and BLU+GRY to Y; rev G adds R84 and jumpers and uses YEL-ORG as an export output winding. The model follows F (leaf 53 at full resolution, checked 2026-10-28) |
 | T2 data | 1:1.732 (50 Ω : 150 Ω windings), Lp 2.5 H, DCR 4 Ω / 27 Ω, k = 0.99992 (≈0.4 mH leakage), core loss 1.5 kΩ across the primary; no winding capacitance | | ratio: Sowter 1486 ("50+50/150+150", replacement for B11148), confirmed by the gain structure; the rest App. (output impedance 39 Ω from UREI test 7) |
 | (load) | 10 kΩ | Bridging load across T2's secondary; the plug-in's output | design choice |
 
@@ -140,6 +140,53 @@ movement (ζ 0.8127, ωn 13.512 rad/s) carries the needle in every mode.
 | T2 | B11148, 1:1.73, no load resistor | 163-12614, R84 1 k across the secondary | output level and impedance |
 | Input | bridged-T + T1 + R5 270 Ω | IC2 5532 differential receiver, C33, R5 10 k Input pot | the rev F input is the subject of this model |
 
+## Revision G in the reference engine (`Circuit1176::setVersion (Version::G)`)
+
+The fast engine and the plug-in carry it (`VersionSpec` G in `Source/dsp/Versions.h`: the receiver is solved as the same netlist, IC2's two output clamps inside the sample, and the level trims are in the calibration layer of both engines). Values are
+from UREI's rev G sheet (leaf 54) as transcribed for this model; rev F's netlist is untouched
+and bit-identical. The preamp, gain cell, side chain and meter law are F's.
+
+| Block | Rev G in the model | Provenance |
+|---|---|---|
+| Input | The 600 ohm generator drives INPUT + through the 100 pF RF capacitor and C30 10 uF into R1-D 10 k (IC2-B, inverting, R1-C 10 k), R1-B 10 k to R2 (500 ohm, wiper centred), IC2-A (summer, R1-A 10 k with C32 100 pF) whose output goes through C33 10 uF to R5 (10 k Input pot), the wiper to R6 27 k. INPUT COM is the generator's return, grounded, through C31 10 uF and R1-E 10 k. IC2's non-inverting inputs sit at Vb = 30.3 V x R4 / (R3 + R4) = 15.15 V (R3, R4 100 k, C34 47 uF). T1, the bridged-T and R5 270 ohm of F are gone | Circuit (Legible); CMR trim at its centre: Approximation (the null is a factory setting that moves common-mode rejection only); C34's voltage rating is Ambiguous (10 or 40 V) and has no effect |
+| IC2 "5532" | Macro-model: differential input 300 kohm, open-loop gain 1e5 with a dominant pole at 100 Hz (gain-bandwidth 10 MHz), 10 ohm output resistance, output clamped to within 2 V of 0 V and +30.3 V by two diodes to supply nodes (a soft knee of about 60 mV per decade of current). Left out: offset, bias current, noise, slew rate (9 V/us), the second pole, crossover | Approximation, NE5532 data sheet typicals (TI SLOS075, +-15 V): 100 V/mV, 10 MHz, 300 kohm, 0.3 ohm closed loop at 10 kHz in a gain of 31 (hence about 10 ohm open loop), +-13 V into 2 kohm |
+| Input pot R5 | 10 k; its divider ratio (track fraction wiper to ground) follows the printed dial's loss, `10^(-loss/20)`, so the Input dial reads as on F and the G-F difference does not move with the dial. An audio taper (17 % of the track at 12 o'clock) was measured and rejected (versions plan, Phase 3b-1 results) | Approximation: the sheets give the part and no taper |
+| Input impedance | 10.0 kohm unbalanced at 50 Hz to 15 kHz (peak 0.943 of the EMF at INPUT +, 600 ohm source); UREI manual 1.2: 10 kohm unbalanced | Derived from the netlist |
+| Preamp | R21 7.5 k, C9 47 uF, C2 68 uF | Circuit |
+| Line amp | C10 1.0 uF, R29 1 M, R30 200 k, R32 2 k, R33 10 k, C13 0.001 uF, R34 4.3 k, C12 12 pF (leading digit dotted on the sheet; 12 pF as F, 22 pF the alternative); gain 1 + R34 / R32 = 3.15 (F 4.9), 3.85 dB less than F | Circuit (C12 Ambiguous, negligible) |
+| R16 | 30 ohm (F 33): the minimum of THD against R16 at UREI's 5.3.5 conditions (0.179 % at 29-30 ohm; 0.192 % at 33 ohm). The factory sets this trimmer per unit | Approximation: the factory procedure on the model |
+| T2 | 16-11148 with one primary (RED-BRN) and the two secondaries in parallel, YEL-ORG open (the export winding): F's 1:1.732, 2.5 H, leakage and core loss with the primary winding resistance doubled (4 to 8 ohm, output impedance about 51 ohm against F's 39); R84 1 k across the secondary in parallel with the 10 k bridging load | Ratio and inductance: F's (Approximation, Sowter 1486); strap: Circuit; R84: Circuit (Legible); the 60 ohm export jumper position is not modelled |
+| Supply | +30.3 V, ideal (VR1 7824 lifted by R88 / R89; its small output resistance is left out); -10 V as F | Circuit; regulation: Approximation |
+
+DC operating point: the voltages marked on the rev K drawing apply to G (the DC values are the same), and the model meets them within the
+tolerances of `plugin1167_test dc` (preamp B+ 25.89 V, Q4 emitter 11.49 V, Q5 base 4.99 V, line-amp output 13.83 V; IC2 at 15.15 V).
+
+Receiver stage, measured on the netlist (EMF of the 600 ohm source to IC2-A's output, 768 kHz): -0.72 dB at 1 kHz (10 k / 10.6 k input divider
+-0.51 dB, R1-A / (R1-B + R2 / 2) = 10 k / 10.25 k -0.21 dB, the gain the drawing intends), -0.79 dB at 20 kHz, equal to the ideal-op-amp
+analysis within 0.04 dB up to 50 kHz; the -3 dB point re 1 kHz is near 130 kHz (the C32 / R1-A pole is at 159 kHz; the 5532's gain-bandwidth and the bilinear warp at 768 kHz bring it down), far above the audio band.
+
+Gain and levels against F (Input and Output full, 2 kHz): maximum gain 45.1 dB (UREI: 45 +-1 dB; F 39.1 dB), 5.98 dB more than F. At the preamp
+output, which is what the side chain sees, G is 10.3 dB hotter than F at the same dial (the line amp takes back 3.85 dB), so the thresholds are
+10.3 dB lower than F's, not the 6 dB of UREI's variations note.
+
+## Revision J in the reference engine and the fast engine (`Version::J`)
+
+J is the sheet titled H as revised through J:
+G's circuit (the table above) except the values below. Rev F's and G's netlists are untouched and bit-identical.
+
+| Block | Rev J in the model | Provenance |
+|---|---|---|
+| Input | G's receiver with C32 220 pF (G 100 pF); R5 10 k Input pot with F's printed-dial law | Circuit (C32 Legible); R5 law Approximation |
+| Preamp, supply, meter | as G: R21 7.5 k, C9 47 uF, C2 68 uF, 30.3 V, R59 3.6 k, +8 through R50 8.2 k (the other reading is 3.2 k) | Circuit |
+| Line amp | R33 11 k and C13 100 uF (G 10 k, 0.001 uF): R33 + C13 is an AC ground, so the gain is 1 + R34 / R32 || R33 = 3.54 and G's +0.5 dB high-frequency shelf is gone (20 kHz re 1 kHz -0.62 dB); R20 1.8 k; the rest as G | Circuit; R33 and R20 Ambiguous, lead decisions (3.4) |
+| R16 | 30 ohm (the THD null on the reference, 0.178 %; as G) | Derived |
+| T2 | 163-12614: one primary and one secondary, R84 1 k. F's data with the primary and the secondary winding resistances doubled (output impedance about 78 ohm; ratio and inductance unchanged) | Approximation (no winding data) |
+| Meter amp LF356H, R49, lamps | not modelled (meter law only) | none |
+
+The DC operating point equals G's (none of J's differences enters the DC solution); the voltages marked on the rev K drawing apply and are met within the tolerances of
+`plugin1167_test --version J dc`. Maximum gain 45.8 dB (UREI: 45 +-1 dB; F 39.1 dB), small-signal gain at the printed 24 / 24 5.99 dB above F's, thresholds 10.1 to 10.3 dB below F's
+at the same dials (the UREI note's -6 dB is not reproduced, as for G). The plug-in's level trims for J are those of G in size: -10.2 dB at the input and +4.21 dB at the output (Custom).
+
 The F-75 issue of the same drawing (waltzingbear.com) also differs in C2 (50 µF), C7 / C8 / C21
 (80 µF), C11 / C18 (50 µF), C14 (25 µF), C15 (400 µF), R45 (1.5 kΩ) and IC1 (LM301). The model
 follows the later F-78 issue.
@@ -149,7 +196,7 @@ follows the later F-78 issue.
 The only drawing with marked voltages is rev K (gyraf.dk). The test builds the netlist with the rev
 K values (`Circuit1176::useRevisionKValues`) and compares; the rev F build is checked where the
 two share parts (drawing voltages scaled by 30.0 / 30.3) and for a sane line-amp bias. Values from
-`urei1176_test dc`:
+`plugin1167_test dc`:
 
 | Node | Rev K drawing | Model, rev K values | Model, rev F (modelled) |
 |---|---|---|---|

@@ -6,7 +6,7 @@ on:
       tag:
         description: Existing draft release tag to build and upload to
         required: true
-        default: v0.2.0
+        default: v0.3.0
         type: string
 
 jobs:

@@ -10,7 +10,7 @@ namespace ar::circuit
 /** A chain of linear networks and non-linear elements that together make an amplifier.
 
     Networks are processed in the order they were added. An element may span two consecutive
-    networks (a tube's grid in one, its plate and cathode in the next). A buffer copies a
+    networks (some of its ports in one, the rest in the next). A buffer copies a
     probe voltage of one network into a voltage source of a later one, for places where the
     real amp has a buffer (an effects loop) or where loading is negligible. */
 class Circuit

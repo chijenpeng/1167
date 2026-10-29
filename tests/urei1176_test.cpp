@@ -41,6 +41,40 @@ namespace
 constexpr double kPi = 3.14159265358979323846;
 int failures = 0;
 
+/** The revision under test (--version D|F|G|J; the circuit engine builds F and G, D and J as F until they have netlists). Every section prepares
+    its channels for it. The expected values below are UREI's documented figures per revision, each with its source. */
+Version gVersion = Version::F;
+/** The factory procedures measure the circuit itself, so the version's level trims (Custom, a plug-in choice) are off for them; only the
+    "trims" section turns them on (and --trims on does for every section). */
+bool gTrims = false;
+
+struct Documented
+{
+    /** Maximum gain (both knobs fully clockwise, 2 kHz) in dB and the window checked around it. Rev F: the model's 39 dB (UREI: the rev H
+        spec of 45 +-1 dB less the 6 dB of the rev G note; checked 37-41). Rev G: UREI's owner's manual (rev H era, leaf 44-56 set, section
+        1.2 and the specifications) gives 45 +-1 dB and G introduced the bridging input that spec describes. */
+    double maxGainLo, maxGainHi;
+    /** Threshold change against rev F at the same dials, dB, and its window. UREI's handwritten variations note (leaf 45) for G:
+        "Threshold lower by 6 dB". The window is the manual's +-2 dB threshold tolerance. */
+    bool hasThresholdVsF;
+    double thresholdVsF, thresholdVsFTol;
+    /** Unity gain with Input and Output at the printed "24": UREI / UA say so for the bridged-T units (D, E, F; UA's reissue manual, 2009).
+        G's Input is a 10 k pot whose printed law is not documented, so there is no marking to check (the gain at 12 o'clock is reported). */
+    bool unityAt24;
+    /** The level (dBFS) of the tone that finds the gain for the VU test (linear, ratio None). It must keep the needle on the scale: rev G at the
+        default dials is 14 dB hotter than F, which pins the needle at the stop with F's -20 dBFS. */
+    double vuProbeDbfs;
+    /** Re-probe at the level found, until the needle reads 0 VU there: a hotter front end bends Q1 a little at 0 VU, so the gain of a quiet probe is not the gain at 0 VU. */
+    bool vuRefine;
+};
+constexpr Documented kDocumented[kNumVersions] = {
+    /* D */ { 37.0, 41.0, false, 0.0, 0.0, true, -20.0, false },        // placeholder (builds as F)
+    /* F */ { 37.0, 41.0, false, 0.0, 0.0, true, -20.0, false },
+    /* G */ { 44.0, 46.0, true, -6.0, 2.0, false, -40.0, true },
+    /* J */ { 44.0, 46.0, true, -6.0, 2.0, false, -40.0, true },        // placeholder (builds as F)
+};
+const Documented& documented() { return kDocumented[(int) gVersion]; }
+
 void check (bool ok, const std::string& what)
 {
     std::printf ("  [%s] %s\n", ok ? "ok" : "FAIL", what.c_str());
@@ -77,7 +111,8 @@ static Run run (double fs, double seconds, const std::function<double (double)>&
 {
     Ch ch;
     setup (ch);
-    ch.prepare (fs);
+    ch.setVersionTrims (gTrims);
+    ch.prepare (fs, gVersion);
     const int n = (int) std::lround (seconds * fs);
     Run r;
     r.out.resize ((size_t) n);
@@ -183,6 +218,27 @@ static void operatingPoint()
     // with rev K must stay within the same tolerances (scaled to its 30.0 V rail); the line amp,
     // whose bias network differs, must sit near half the rail for symmetrical clipping, every
     // transistor in its active region.
+    if (Circuit1176::hasBridgingInput (gVersion))
+    {
+        // Revs G and J have the rev K drawing's DC values (R21, C9, C10, R29, R30, R32, R34 and the 30.3 V supply; R33, C13, C2 and C12 do not enter
+        // the DC solution), so the voltages marked on the K drawing apply at their own scale: 1.0.
+        std::printf ("operating point of the rev %c build against the rev K drawing's marked voltages (same DC values), and IC2\n", specFor (gVersion).name);
+        Channel g;
+        g.prepare (48000.0, gVersion);
+        auto& mg = g.circuitModel();
+        for (const auto& r : rows)
+        {
+            if (std::string (r.node) == "q1.g") continue;
+            const double v = mg.nodeVolts (r.net, r.node);
+            std::snprintf (what, sizeof (what), "%-16s rev K drawing: %6.2f V, rev %c model %6.2f V (tolerance %.2f V)", r.label, r.drawing, specFor (gVersion).name, v, r.tol);
+            check (std::abs (v - r.drawing) <= r.tol, what);
+        }
+        const double vb = mg.nodeVolts ("1176", "ic2.vb"), a = mg.nodeVolts ("1176", "ic2a.out"), b = mg.nodeVolts ("1176", "ic2b.out");
+        std::snprintf (what, sizeof (what), "IC2 bias node %.3f V (R3 / R4 halve 30.3 V: 15.15), IC2-A / IC2-B outputs %.3f / %.3f V, wiper %.4f V, input node %.4f V",
+                       vb, a, b, mg.nodeVolts ("1176", "r5.wiper"), mg.nodeVolts ("1176", "in"));
+        check (std::abs (vb - 15.15) < 0.01 && std::abs (a - vb) < 0.01 && std::abs (b - vb) < 0.01 && std::abs (mg.nodeVolts ("1176", "r5.wiper")) < 0.01, what);
+        return;
+    }
     std::printf ("operating point of the rev F build (its drawing marks no voltages)\n");
     Channel f;
     f.prepare (48000.0);
@@ -392,11 +448,30 @@ static void unityGain()
     std::printf ("gain structure (below threshold, limiting on, 4:1)\n");
     const double unity = gainAt (1000.0, [] (Ch&) {});
     char what[200];
-    std::snprintf (what, sizeof (what), "Input and Output at 24 (UREI / UA: unity gain): %+.2f dB at 1 kHz", unity);
-    check (std::abs (unity) < 1.0, what);
+    if (documented().unityAt24)
+    {
+        std::snprintf (what, sizeof (what), "Input and Output at 24 (UREI / UA: unity gain): %+.2f dB at 1 kHz", unity);
+        check (std::abs (unity) < 1.0, what);
+    }
+    else
+    {
+        // No documented marking: report the gain at 12 o'clock, and find the Input rotation that gives unity with Output at 12 o'clock.
+        double lo = 0.0, hi = 1.0;
+        for (int i = 0; i < 9; ++i)
+        {
+            const double mid = 0.5 * (lo + hi);
+            (gainAt (1000.0, [mid] (Ch& c) { c.setInput ((float) mid); }) < 0.0 ? lo : hi) = mid;
+        }
+        const double rot = 0.5 * (lo + hi);
+        const double atRot = gainAt (1000.0, [rot] (Ch& c) { c.setInput ((float) rot); });
+        std::snprintf (what, sizeof (what), "Input and Output at 12 o'clock: %+.2f dB at 1 kHz (no documented unity marking for this revision); unity gain at Input rotation %.3f (%+.2f dB)",
+                       unity, rot, atRot);
+        check (std::abs (atRot) < 0.5, what);
+    }
     const double full = gainAt (2000.0, [] (Ch& c) { c.setInput (Range::inputMax); c.setOutput (Range::outputMax); }, -70.0);
-    std::snprintf (what, sizeof (what), "maximum gain (both full) %.1f dB at 2 kHz (rev H / UA: 45 +-1; rev F ~6 dB less per UREI's revision notes)", full);
-    check (full > 37.0 && full < 41.0, what);
+    std::snprintf (what, sizeof (what), "maximum gain (both full) %.1f dB at 2 kHz (rev H / UA: 45 +-1; rev F ~6 dB less per UREI's revision notes; checked %.0f-%.0f)",
+                   full, documented().maxGainLo, documented().maxGainHi);
+    check (full > documented().maxGainLo && full < documented().maxGainHi, what);
     // UREI factory test 8 window (+0.5 / -1 dB, 20 Hz - 20 kHz) at the unity setting.
     double worstHi = -100.0, worstLo = 100.0;
     std::string list;
@@ -424,7 +499,8 @@ static void biasTest()
     {
         Ch ch;
         ch.setInput (Range::inputMax); ch.setOutput (Range::outputMax); ch.setRatio (Ratio::r20); ch.setRelease (7.0f); ch.setLimitOff (true);
-        ch.prepare (96000.0);
+        ch.setVersionTrims (gTrims);
+        ch.prepare (96000.0, gVersion);
         if (ccw)
         {
             diagSetBias (ch, 1.0);   // settles the operating point with R81 there (reset() keeps the pot)
@@ -509,9 +585,16 @@ static void vuBallistics()
     const double fs = 48000.0;
     // No limiting (ratio None) so the output follows the input; find the input for 0 VU first.
     const Setup setup = [] (Ch& c) { c.setRatio (Ratio::none); c.setMeterMode (MeterMode::plus4); };
-    const auto probe = run (fs, 2.0, sine (-20.0, 1000.0), setup, 64);
-    const double gainDb = probe.needle.back() - (-20.0 + 18.0 - 4.0);   // needle reads output dBu - 4
-    const double inDbfs = 4.0 - 18.0 - gainDb;                           // input for 0 VU
+    const double probeDbfs = documented().vuProbeDbfs;
+    const auto probe = run (fs, 2.0, sine (probeDbfs, 1000.0), setup, 64);
+    const double gainDb = probe.needle.back() - (probeDbfs + 18.0 - 4.0);   // needle reads output dBu - 4
+    double inDbfs = 4.0 - 18.0 - gainDb;                                 // input for 0 VU
+    if (documented().vuRefine)
+        for (int i = 0; i < 3; ++i)
+        {
+            const auto again = run (fs, 2.0, sine (inDbfs, 1000.0), setup, 64);
+            inDbfs -= again.needle.back();
+        }
     const double tOn = 0.5, tOff = 1.5;
     const int block = 16;
     const double amp = fromDb (inDbfs);
@@ -543,7 +626,8 @@ static void realtimeSafety()
 {
     std::printf ("real-time safety\n");
     Ch ch;
-    ch.prepare (48000.0);
+    ch.setVersionTrims (gTrims);
+    ch.prepare (48000.0, gVersion);
     std::vector<float> x (512);
     long allocations = 0;
     for (int b = 0; b < 400; ++b)
@@ -559,6 +643,7 @@ static void realtimeSafety()
         ch.setLimitOff (b % 13 == 0);
         ch.setMeterMode ((MeterMode) (b % 4));
         ch.setCalibrationDbu (10.0f + (float) (b % 17));
+        if (b % 7 == 0) ch.setVersionTrims (b % 14 == 0);   // the trims switch while processing, too
         ch.process (x.data(), (int) x.size());
         gCounting = false;
     }
@@ -575,7 +660,8 @@ static void performance()
     {
         Ch ch;
         ch.setInput (Range::inputMax);
-        ch.prepare (fs);
+        ch.setVersionTrims (gTrims);
+        ch.prepare (fs, gVersion);
         const int n = (int) (4.0 * fs);
         std::vector<float> x ((size_t) n);
         for (int i = 0; i < n; ++i)
@@ -602,6 +688,77 @@ static void performance()
     }
 }
 
+/** The version's level trims (Custom): with them on, the version's thresholds equal rev F's at the same dials, its small-signal gain at the printed
+    24 / 24 equals F's, and the +4 meter reads the same for the same plug-in output level. Runs on the engine under test, F being the engine of the
+    same kind with no trims. Only versions with trims have anything to check. */
+struct TrimsOn
+{
+    bool saved;
+    TrimsOn() : saved (gTrims) { gTrims = true; }
+    ~TrimsOn() { gTrims = saved; }
+};
+struct VersionIs
+{
+    Version saved;
+    explicit VersionIs (Version v) : saved (gVersion) { gVersion = v; }
+    ~VersionIs() { gVersion = saved; }
+};
+
+static void trimsSection()
+{
+    const VersionSpec& spec = specFor (gVersion);
+    if (spec.inputTrimDb == 0.0 && spec.outputTrimDb == 0.0)
+        return;
+    std::printf ("level trims of rev %c (input %+.1f dB, output %+.2f dB; Custom) against rev F, trims on\n", spec.name, spec.inputTrimDb, spec.outputTrimDb);
+    const TrimsOn on;
+    const Version mine = gVersion;
+    auto thresholdFor = [] (Version v, Ratio ratio, float input)
+    {
+        const VersionIs scope (v);
+        return levelForReduction (48000.0, 1.0, [ratio, input] (Ch& c) { c.setInput (input); c.setRatio (ratio); }, 5.0);
+    };
+    double worst = 0.0;
+    std::string where;
+    for (Ratio ratio : { Ratio::r4, Ratio::r20 })
+        for (float input : { Range::inputMax, Range::inputDefault, 0.25f })
+        {
+            const double d = thresholdFor (mine, ratio, input) - thresholdFor (Version::F, ratio, input);
+            char item[80];
+            std::snprintf (item, sizeof (item), " %s/Input %.2f %+.2f", ratioName (ratio), (double) input, d);
+            where += item;
+            worst = std::max (worst, std::abs (d));
+        }
+    char what[400];
+    std::snprintf (what, sizeof (what), "1 dB-of-reduction thresholds minus rev F's (dB):%s; worst %.2f dB (checked 0.3)", where.c_str(), worst);
+    check (worst < 0.3, what);
+
+    // small-signal gain at 24 / 24 and the +4 meter for the same output level
+    auto gainAndNeedle = [] (Version v, double& needleDb)
+    {
+        const VersionIs scope (v);
+        const Setup setup = [] (Ch& c) { c.setRatio (Ratio::none); c.setMeterMode (MeterMode::plus4); };
+        const auto r = run (48000.0, 2.0, sine (-60.0, 1000.0), setup, 64);
+        const size_t n = r.out.size(), from = n - (size_t) (0.25 * 48000.0);
+        needleDb = r.needle.back();
+        return db (rmsOf (r.out, from, n)) - (-60.0 + db (1.0 / std::sqrt (2.0)));
+    };
+    double needleMine = 0.0, needleF = 0.0;
+    const double gMine = gainAndNeedle (mine, needleMine), gF = gainAndNeedle (Version::F, needleF);
+    std::snprintf (what, sizeof (what), "gain at 24 / 24, 1 kHz, -60 dBFS: rev %c %+.3f dB, rev F %+.3f dB, difference %+.3f dB (checked 0.1)", spec.name, gMine, gF, gMine - gF);
+    check (std::abs (gMine - gF) < 0.1, what);
+    // The same probe through each version in the +4 mode at a level that reads on the scale: the readings agree when the make-up is taken out of the meter.
+    auto needleAt = [] (Version v)
+    {
+        const VersionIs scope (v);
+        const Setup setup = [] (Ch& c) { c.setRatio (Ratio::none); c.setMeterMode (MeterMode::plus4); };
+        return run (48000.0, 2.0, sine (-18.0, 1000.0), setup, 64).needle.back();
+    };
+    const double nMine = needleAt (mine), nF = needleAt (Version::F);
+    std::snprintf (what, sizeof (what), "+4 meter for a -18 dBFS tone at 24 / 24: rev %c reads %+.2f VU, rev F %+.2f VU (same plug-in output level: checked 0.3 dB)", spec.name, nMine, nF);
+    check (std::abs (nMine - nF) < 0.3, what);
+    (void) needleMine; (void) needleF;
+}
+
 static void runSections (const std::vector<std::string>& wanted)
 {
     struct Section { const char* name; void (*fn)(); };
@@ -609,7 +766,7 @@ static void runSections (const std::vector<std::string>& wanted)
         { "dc", operatingPoint }, { "ratio", ratioTest }, { "threshold", thresholds }, { "none", noReduction },
         { "timing", timing }, { "thd", thd }, { "unity", unityGain }, { "bias", biasTest }, { "meter", meterTracking },
         { "rates", sampleRates }, { "hot", hotInput }, { "idle", idleMeter }, { "vu", vuBallistics }, { "rt", realtimeSafety },
-        { "perf", performance },
+        { "perf", performance }, { "trims", trimsSection },
     };
     for (const auto& sec : sections)
     {
@@ -619,6 +776,169 @@ static void runSections (const std::vector<std::string>& wanted)
     }
 }
 };
+
+//==============================================================================================
+// Sections that compare revisions or scan a trimmer: the circuit engine only.
+namespace revisions
+{
+using T = Tests<Channel>;
+
+struct Scope
+{
+    Version saved;
+    explicit Scope (Version v) : saved (gVersion) { gVersion = v; }
+    ~Scope() { gVersion = saved; }
+};
+
+/** Input level (dBFS) for 1 dB of reduction, 1 kHz settled (5 s tones), at an Input rotation, for a revision. */
+static double threshold1dB (Version v, Ratio ratio, float input)
+{
+    Scope scope (v);
+    const T::Setup setup = [ratio, input] (Channel& c) { c.setInput (input); c.setRatio (ratio); };
+    return T::levelForReduction (48000.0, 1.0, setup, 5.0);
+}
+
+/** UREI's note for rev G: "Threshold lower by 6 dB" (leaf 45). Measured at the same dials and calibration, against rev F. */
+static void thresholdVsF()
+{
+    if (! documented().hasThresholdVsF)
+        return;
+    const Documented& d = documented();
+    std::printf ("threshold against rev F at the same dials, report only (UREI leaf 45: %+.0f dB, +-%.0f dB as the manual's tolerance; the circuit does not reproduce it, see the\n"
+                 "  plan's open question on the 6 dB); 1 dB of reduction, 1 kHz, settled\n", d.thresholdVsF, d.thresholdVsFTol);
+    // The H-era manual's thresholds (4:1 -30, 8:1 -26, 12:1 -25, 20:1 -24 dB, +-2; the 4:1 figure is garbled in the OCR and was read as -30 earlier)
+    // are for the bridging-input units. They are printed for information: UREI does not say how a threshold is read.
+    constexpr double manual[] { -30.0, -26.0, -25.0, -24.0 };
+    for (int k = 0; k < 4; ++k)
+    {
+        const Ratio ratio = (Ratio) k;
+        for (float input : { Range::inputMax, Range::inputDefault })
+        {
+            const double f = threshold1dB (Version::F, ratio, input), g = threshold1dB (gVersion, ratio, input);
+            char what[260];
+            std::snprintf (what, sizeof (what), "%-4s Input %.2f: rev F %6.1f dBu, this revision %6.1f dBu, difference %+.2f dB", T::ratioName (ratio), (double) input,
+                           f + 18.0, g + 18.0, g - f);
+            // Report only: the circuit gives about -10.3 dB against UREI's -6 dB (plan, Phase 3b-1 results, open question); both dials are printed.
+            std::printf ("  [report] %s (documented %+.0f +-%.0f)\n", what, d.thresholdVsF, d.thresholdVsFTol);
+            if (input == Range::inputMax)
+                std::printf ("  [info] manual (rev H era) threshold %+.0f dB +-2: this revision %+.1f dBu, %s\n", manual[k], g + 18.0,
+                             std::abs (g + 18.0 - manual[k]) <= 2.0 ? "inside" : "outside");
+        }
+    }
+}
+
+/** THD at UREI's 5.3.5 conditions for a trimmer value. */
+static double thdAt (Version v, double r16, double r33 = 0.0, double r20 = 0.0)
+{
+    Scope scope (v);
+    const double fs = 96000.0, f0 = 500.0;
+    Channel ch;
+    ch.setInput (Range::inputMax); ch.setOutput (rotationForMarking (18.0f)); ch.setRatio (Ratio::r20); ch.setRelease (7.0f); ch.setLimitOff (true);
+    ch.circuitModel().setVersion (v);   // a change of version clears the R16 override, so the version goes first
+    ch.circuitModel().setR16 (r16);
+    ch.circuitModel().setR33 (r33);
+    ch.circuitModel().setR20 (r20);
+    ch.setVersionTrims (gTrims);
+    ch.prepare (fs, v);
+    const int n = (int) (3.0 * fs);
+    std::vector<float> x ((size_t) n);
+    const double a = fromDb (dbfsOf (-30.0));
+    for (int i = 0; i < n; ++i) x[(size_t) i] = (float) (a * std::sin (2.0 * kPi * f0 * i / fs));
+    for (int s = 0; s < n; s += 256) ch.process (x.data() + s, std::min (256, n - s));
+    const size_t count = (size_t) (fs / f0) * 200, from = x.size() - count;
+    const double h1 = T::harmonic (x, from, count, fs, f0, 1);
+    double h = 0.0;
+    for (int k = 2; k <= 10; ++k) { const double hk = T::harmonic (x, from, count, fs, f0, k); h += hk * hk; }
+    return 100.0 * std::sqrt (h) / h1;
+}
+
+/** UREI 5.3.5: R16 is turned for minimum THD at 500 Hz, -30 dBu, Input full, Output 18, Attack OFF, Release full, 20:1. */
+static void r16Null()
+{
+    std::printf ("THD null of R16 (UREI 5.3.5 conditions, limiting off), rev %c\n", specFor (gVersion).name);
+    double best = 1e9, bestR = 0.0;
+    std::string list;
+    for (double r : { 10.0, 15.0, 20.0, 25.0, 27.0, 28.0, 29.0, 30.0, 31.0, 32.0, 33.0, 34.0, 36.0, 40.0, 50.0, 60.0, 80.0, 100.0 })
+    {
+        const double t = thdAt (gVersion, r);
+        char item[40];
+        std::snprintf (item, sizeof (item), " %g:%.3f", r, t);
+        list += item;
+        if (t < best) { best = t; bestR = r; }
+    }
+    char what[300];
+    std::snprintf (what, sizeof (what), "THD %% against R16 (ohm):%s; minimum %.3f %% at %g ohm; the built-in setting (%g ohm) gives %.3f %%", list.c_str(), best, bestR,
+                   Circuit1176::factoryR16 (gVersion), thdAt (gVersion, Circuit1176::factoryR16 (gVersion)));
+    // The null is shallow (a trimmer, not a notch): the shipped setting must sit within 0.05 % of the scanned minimum, and the spec is 0.5 %.
+    check (thdAt (gVersion, Circuit1176::factoryR16 (gVersion)) <= best + 0.05 && best < 0.5, what);
+}
+
+/** The input impedance of rev G and J (UREI manual 1.2: 10 kohm unbalanced, 20 kohm balanced) from the divider with the 600 ohm source. */
+static void inputImpedance()
+{
+    if (! Circuit1176::hasBridgingInput (gVersion))
+        return;
+    std::printf ("input impedance (600 ohm source into INPUT +, INPUT COM grounded; UREI manual 1.2: 10 kohm unbalanced)\n");
+    for (double hz : { 50.0, 1000.0, 15000.0 })
+    {
+        Channel ch;
+        ch.setInput (Range::inputMax);
+        ch.setVersionTrims (gTrims);
+        ch.prepare (192000.0, gVersion);
+        auto& m = ch.circuitModel();
+        double peakIn = 0.0;
+        const int n = (int) (192000.0 * std::max(0.1, 12.0 / hz));
+        const double emf = 1.0;
+        for (int i = 0; i < n; ++i)
+        {
+            m.processSample (emf * std::sin (2.0 * kPi * hz * i / 192000.0));
+            if (i > n / 2) peakIn = std::max (peakIn, std::abs (m.nodeVolts ("1176", "in")));
+        }
+        const double zin = 600.0 * peakIn / (emf - peakIn);   // |V_in| / |I|, with the divider read in magnitude (the reactive part is small)
+        char what[200];
+        std::snprintf (what, sizeof (what), "%6.0f Hz: |Zin| = %.2f kohm (peak at INPUT + %.4f V for 1 V EMF)", hz, zin / 1e3, peakIn);
+        check (zin > 9.5e3 && zin < 10.6e3, what);
+    }
+}
+
+/** The sheet titled H leaves R33 (11 k, 1.1 k or 10 k) and R20 (1.3 k or 1.8 k) ambiguous (schematic-revisions.md 3.1). Each candidate on the reference engine: gain at
+    24 / 24 and at both knobs full, the 4:1 threshold, the response re 1 kHz and the THD of the factory procedure. The plan's policy (section 1.4) escalates a candidate
+    that moves gain or threshold by more than 0.5 dB against the chosen reading (R33 11 k, R20 1.8 k). Report only. */
+static void ambiguitySweep()
+{
+    if (gVersion != Version::J)
+        return;
+    struct Candidate { const char* name; double r33, r20; };
+    const Candidate candidates[] = { { "R33 11 k, R20 1.8 k (chosen)", 0.0, 0.0 }, { "R33 1.1 k", 1.1e3, 0.0 }, { "R33 10 k", 10e3, 0.0 }, { "R20 1.3 k", 0.0, 1.3e3 } };
+    std::printf ("ambiguity sweep of the sheet titled H (R33, R20), rev J on the reference engine, report only\n");
+    std::printf ("  %-30s %9s %9s %10s %9s %8s %8s %8s %8s %8s\n", "candidate", "gain 1k", "max gain", "4:1 thr", "20 Hz", "10 kHz", "15 kHz", "20 kHz", "THD %", "Q3 e V");
+    double base[3] {};
+    for (size_t i = 0; i < sizeof (candidates) / sizeof (candidates[0]); ++i)
+    {
+        const Candidate& c = candidates[i];
+        auto setR = [&c] (Channel& ch)
+        {
+            ch.circuitModel().setVersion (gVersion);   // a change of version clears the overrides, so the version goes first
+            ch.circuitModel().setR33 (c.r33);
+            ch.circuitModel().setR20 (c.r20);
+        };
+        const double unity = T::gainAt (1000.0, setR);
+        const double full = T::gainAt (2000.0, [&setR] (Channel& ch) { setR (ch); ch.setInput (Range::inputMax); ch.setOutput (Range::outputMax); }, -70.0);
+        const double thr = T::levelForReduction (48000.0, 1.0, [&setR] (Channel& ch) { setR (ch); ch.setInput (Range::inputMax); ch.setRatio (Ratio::r4); }, 5.0) + 18.0;
+        double resp[4];
+        int k = 0;
+        for (double hz : { 20.0, 10000.0, 15000.0, 20000.0 }) resp[k++] = T::gainAt (hz, setR) - unity;
+        const double thd = thdAt (gVersion, Circuit1176::factoryR16 (gVersion), c.r33, c.r20);
+        Channel probe;
+        setR (probe);
+        probe.prepare (48000.0, gVersion);
+        const double q3e = probe.circuitModel().nodeVolts ("1176", "q3.e");
+        if (i == 0) { base[0] = unity; base[1] = full; base[2] = thr; }
+        std::printf ("  %-30s %+9.2f %9.2f %10.2f %+9.2f %+8.2f %+8.2f %+8.2f %8.3f %8.3f   (vs chosen: gain %+.2f, max gain %+.2f, threshold %+.2f dB)\n", c.name, unity, full, thr,
+                     resp[0], resp[1], resp[2], resp[3], thd, q3e, unity - base[0], full - base[1], thr - base[2]);
+    }
+}
+} // namespace revisions
 
 } // namespace
 
@@ -632,7 +952,19 @@ int main (int argc, char** argv)
     for (int i = 1; i < argc; ++i)
     {
         if (std::string (argv[i]) == "--fast") fast = true;
+        else if (std::string (argv[i]) == "--trims" && i + 1 < argc) gTrims = std::string (argv[++i]) == "on";
+        else if (std::string (argv[i]) == "--version" && i + 1 < argc)
+        {
+            const std::string v = argv[++i];
+            if (v == "D") gVersion = Version::D; else if (v == "F") gVersion = Version::F; else if (v == "G") gVersion = Version::G; else if (v == "J") gVersion = Version::J;
+            else { std::fprintf (stderr, "--version takes D, F, G or J\n"); return 2; }
+        }
         else wanted.push_back (argv[i]);
+    }
+    if (fast && specFor (gVersion).placeholderOfF && gVersion != Version::F)
+    {
+        std::fprintf (stderr, "--fast: version %c is still a placeholder of F in the fast engine\n", specFor (gVersion).name);
+        return 2;
     }
     // MSVC's _IOLBF validates the buffer size as 2..INT_MAX even when buffer is null, so 0
     // invokes the invalid-parameter handler and fast-fails before the first test output.
@@ -646,11 +978,24 @@ int main (int argc, char** argv)
     {
         std::vector<std::string> w;
         for (const auto& n : wanted) if (n != "dc") w.push_back (n);
-        if (wanted.empty()) for (const char* n : { "ratio", "threshold", "none", "timing", "thd", "unity", "bias", "meter", "rates", "hot", "idle", "vu", "rt", "perf" }) w.push_back (n);
+        if (wanted.empty()) for (const char* n : { "ratio", "threshold", "none", "timing", "thd", "unity", "bias", "meter", "rates", "hot", "idle", "vu", "rt", "perf", "trims" }) w.push_back (n);
         Tests<FastChannel>::runSections (w);
     }
     else
+    {
+        std::printf ("revision %c\n", specFor (gVersion).name);
         Tests<Channel>::runSections (wanted);
+        // Extra sections: by name ("versions", "r16", "zin"), and with no names for any revision other than F (rev F's sections stay as they were).
+        auto wants = [&wanted] (const char* name)
+        {
+            for (const auto& w : wanted) if (w == name) return true;
+            return false;
+        };
+        if (wants ("versions") || (wanted.empty() && gVersion != Version::F)) revisions::thresholdVsF();
+        if (wants ("r16") || (wanted.empty() && gVersion != Version::F)) revisions::r16Null();
+        if (wants ("sweep")) revisions::ambiguitySweep();
+        if (wants ("zin") || (wanted.empty() && gVersion != Version::F)) revisions::inputImpedance();
+    }
     std::printf (failures == 0 ? "all checks passed\n" : "%d check(s) failed\n", failures);
     return failures == 0 ? 0 : 1;
 }

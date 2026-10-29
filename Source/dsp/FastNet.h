@@ -30,7 +30,7 @@ public:
 
     void clear() noexcept
     {
-        nNodes = 0; nSrc = 0; nInj = 0; nCoup = 0; nOut = 0; nR = nC = nG = nQ = 0;
+        nNodes = 0; nSrc = 0; nInj = 0; nCoup = 0; nOut = 0; nR = nC = nG = nQ = 0; nVcvs = 0;
         nIn = 0;
     }
 
@@ -40,6 +40,9 @@ public:
     void capacitor (int a, int b, double farads) noexcept { c[nC++] = { a, b, farads }; }
     /** Current gm (v_c - v_d) flows from a to b. */
     void vccs (int a, int b, int cc, int d, double gm) noexcept { g[nG++] = { a, b, cc, d, gm }; }
+    /** An ideal voltage-controlled voltage source: v(out) = gain (v(cp) - v(cm)), the node `out` driven against ground (an extra MNA
+        row, no state). For the op-amp macro-model of rev G's and J's input. */
+    void vcvs (int out, int cp, int cm, double gain) noexcept { vc[nVcvs++] = { out, cp, cm, gain }; }
     /** An ideal voltage source from ground to `node`: input `index`, its delivered current output
         `outSourceCurrent(index)`. */
     int source (int node) noexcept { src[nSrc] = node; inputKind[nIn] = 0; inputSlot[nIn] = nSrc; ++nSrc; return nIn++; }
@@ -58,7 +61,7 @@ public:
     bool build (double T) noexcept
     {
         const int nn = nNodes;
-        const int mm = nn + nSrc + 2 * nCoup;
+        const int mm = nn + nSrc + 2 * nCoup + nVcvs;
         if (mm > kMaxM) return false;
         ns = nC + 2 * nCoup;
         if (ns > kMaxS || nIn > kMaxI || nOut > kMaxO) return false;
@@ -131,6 +134,15 @@ public:
             Q[s1][r1] = e.l1; Q[s1][r2] = e.m; kappa[s1] = 2.0 * a;
             Q[s2][r1] = e.m;  Q[s2][r2] = e.l2; kappa[s2] = 2.0 * a;
         }
+        for (int k = 0; k < nVcvs; ++k)
+        {
+            const auto& e = vc[k];
+            const int row = nn + nSrc + 2 * nCoup + k;
+            M[ix (e.out)][row] -= 1.0;          // the current the source delivers into `out`
+            M[row][ix (e.out)] += 1.0;
+            if (e.cp > 0) M[row][ix (e.cp)] -= e.gain;
+            if (e.cm > 0) M[row][ix (e.cm)] += e.gain;
+        }
         if (! invert (M, m)) return false;     // M now holds the inverse
         // Xu = Minv Bu, Xh = Minv Bh
         for (int i = 0; i < m; ++i)
@@ -195,6 +207,7 @@ private:
     struct Vccs { int a, b, c, d; double gm; };
     struct Inj { int a, b; };
     struct Coup { int a1, b1, a2, b2; double l1, l2, m; };
+    struct Vcvs { int out, cp, cm; double gain; };
     struct Out { int kind, a, b; };
 
     static bool invert (double (&a)[kMaxM][kMaxM], int n) noexcept
@@ -228,9 +241,9 @@ private:
         return true;
     }
 
-    int nNodes = 0, nSrc = 0, nInj = 0, nCoup = 0, nOut = 0, nR = 0, nC = 0, nG = 0, nQ = 0, nIn = 0;
+    int nNodes = 0, nSrc = 0, nInj = 0, nCoup = 0, nOut = 0, nR = 0, nC = 0, nG = 0, nQ = 0, nIn = 0, nVcvs = 0;
     int ns = 0, m = 0;
-    Res r[kMaxEl]; Cap c[kMaxEl]; Vccs g[kMaxEl]; Inj inj[kMaxI]; Coup coup[4]; Out out[kMaxO];
+    Res r[kMaxEl]; Cap c[kMaxEl]; Vccs g[kMaxEl]; Inj inj[kMaxI]; Coup coup[4]; Out out[kMaxO]; Vcvs vc[8];
     int src[kMaxI] {}, inputKind[kMaxI] {}, inputSlot[kMaxI] {};
     double M[kMaxM][kMaxM], Bu[kMaxM][kMaxI], Bh[kMaxM][kMaxS], Q[kMaxS][kMaxM], kappa[kMaxS];
     double Xu[kMaxM][kMaxI], Xh[kMaxM][kMaxS];

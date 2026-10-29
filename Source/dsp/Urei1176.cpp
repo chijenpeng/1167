@@ -22,10 +22,12 @@ namespace urei1176
 {
 using namespace ar::circuit;
 
+#if UREI1176_FIT_HOOKS
+unsigned gAblation = 0;
+#endif
+
 namespace
 {
-using DeviceList = std::vector<std::unique_ptr<Device>>;
-
 /** R81 "Q bias": UREI's factory test 10 turns it until the output drops exactly 1.0 dB with the
     limiting switched off, which puts Q1 slightly into conduction at idle. */
 constexpr Real kIdleReductionDb = 1.0;
@@ -33,18 +35,37 @@ constexpr Real kIdleReductionDb = 1.0;
     manual says (5.3.5): minimum THD for 500 Hz at -30 dB, Input full, Output at 18, Attack OFF,
     Release full, 20:1. With the rev F values the minimum is still at 25-33 ohm. */
 constexpr Real kR16 = 33.0;
-/** The values that differ between UREI's rev F drawing (s/n 2611-7052, the one modelled) and its
-    rev K drawing (the one gyraf.dk redrew with static voltages), in the part both share: from
-    T1's secondary (rev K: C33 and the Input pot) to C15. The rev K set exists to check the
-    netlist against the voltages marked on that drawing. */
+/** The values that differ between the drawings the reference builds: UREI's rev F (s/n 2611-7052, the one modelled), G and J, and
+    the rev K drawing (the one gyraf.dk redrew with static voltages), from T1's secondary (G, J and K: the 5532 receiver, C33 and the
+    Input pot) to C15. The rev K set exists to check the netlist against the voltages marked on that drawing. */
 struct Values
 {
-    Real supply;                // +30 V rail: rev F a 30 V shunt zener (CR5, R84 75R 3W); rev K a 7824 lifted to 30.3 V
+    Real supply;                // +30 V rail: rev F a 30 V shunt zener (CR5, F's R84 75R 3W); rev G, J and K a 7824 lifted to 30.3 V
     Real c2, r21, c9;           // preamp
     Real c10, r29, r30, r32, r33, c13, r34, c12;   // line amp
+    Real r20, c32;              // R20 (Q3's emitter leg); C32 (the bridging receiver's feedback capacitor: rev G and later only)
 };
-constexpr Values kRevF { 30.0, 68e-6, 6.8e3, 1.0e-6, 0.15e-6, 6.8e6, 1e6, 1e3, 4.7e3, 2.2e-9, 3.9e3, 12e-12 };
-constexpr Values kRevK { 30.3, 100e-6, 7.5e3, 47e-6, 1.0e-6, 1e6, 200e3, 2e3, 11e3, 100e-6, 4.3e3, 10e-12 };
+constexpr Values kRevF { 30.0, 68e-6, 6.8e3, 1.0e-6, 0.15e-6, 6.8e6, 1e6, 1e3, 4.7e3, 2.2e-9, 3.9e3, 12e-12, 1.8e3, 0.0 };
+constexpr Values kRevK { 30.3, 100e-6, 7.5e3, 47e-6, 1.0e-6, 1e6, 200e3, 2e3, 11e3, 100e-6, 4.3e3, 10e-12, 1.8e3, 0.0 };
+/** UREI's rev G drawing (leaf 54, schematic-revisions.md 2.1), all Legible but C12 (12 pF as F; 22 pF possible). Not the rev K set:
+    R33 10 k and C13 0.001 uF (K: 11 k, 100 uF), C2 68 uF (K: 100 uF), C12 12 pF (K: 10 pF). */
+constexpr Values kRevG { 30.3, 68e-6, 7.5e3, 47e-6, 1.0e-6, 1e6, 200e3, 2e3, 10e3, 0.001e-6, 4.3e3, 12e-12, 1.8e3, 100e-12 };
+/** UREI's sheet titled H as revised through J (schematic-revisions.md 3.1): G's values except C32 220 pF, R33 11 k and C13 100 uF (the shelf becomes an AC
+    ground). R33 is Ambiguous (11 k, 1.1 k, 10 k) and R20 Ambiguous (1.3 k, 1.8 k): 11 k and 1.8 k are used (the sweep: schematic-revisions.md 3.4). */
+constexpr Values kRevJ { 30.3, 68e-6, 7.5e3, 47e-6, 1.0e-6, 1e6, 200e3, 2e3, 11e3, 100e-6, 4.3e3, 12e-12, 1.8e3, 220e-12 };
+const Values& valuesFor (Version version, bool revK) noexcept
+{
+    switch (version)
+    {
+        case Version::G: return kRevG;
+        case Version::J: return kRevJ;
+        case Version::D:   // builds as F until it has a netlist
+        case Version::F: break;
+    }
+    return revK ? kRevK : kRevF;
+}
+/** G's and J's Input pot R5 and T2's R84. */
+constexpr Real kR5Ohms = 10e3, kR84Ohms = 1e3;
 /** Fraction of the drain swing across Q1's channel: the source follows the rest (C2 to the
     R13 / R14 junction). Used for the meter and the factory bias only, not in the circuit. */
 constexpr Real kChannelShare = 0.48;
@@ -63,6 +84,13 @@ Real channelConductance (const JfetDevice& fet, Real vgs) noexcept
 } // namespace
 
 //==============================================================================================
+Real Circuit1176::factoryR16 (Version v) noexcept
+{
+    // G and J (the revisions with the bridging input): the null of UREI's 5.3.5 procedure on the model (urei1176_test --version G r16):
+    // THD 0.179 % at 29-30 ohm, 0.192 % at 33; J's null is also at 30 ohm (Phase 4).
+    return hasBridgingInput (v) ? 30.0 : kR16;
+}
+
 Real Circuit1176::gateSourceVolts() const noexcept
 {
     return main->nodeVoltage (gateNode) - main->nodeVoltage (sourceNode);
@@ -138,10 +166,26 @@ Real Circuit1176::nodeVolts (const std::string& network, const std::string& node
 void Circuit1176::build (double sampleRate)
 {
     fs = sampleRate;
-    const Values& v = revK ? kRevK : kRevF;
+    Values v = valuesFor (version, revK);
+#if UREI1176_FIT_HOOKS
+    // ablation: each bit puts one of G's (or J's) values back to F's
+    if (gAblation & kAblateSupply) v.supply = kRevF.supply;
+    if (gAblation & kAblatePreamp) { v.r21 = kRevF.r21; v.c9 = kRevF.c9; }
+    if (gAblation & kAblateC10) v.c10 = kRevF.c10;
+    if (gAblation & kAblateBias) { v.r29 = kRevF.r29; v.r30 = kRevF.r30; }
+    if (gAblation & kAblateR32) v.r32 = kRevF.r32;
+    if (gAblation & kAblateR33) { v.r33 = kRevF.r33; v.c13 = kRevF.c13; }
+    if (gAblation & kAblateR34) v.r34 = kRevF.r34;
+#endif
+    if (r33Override > 0.0) v.r33 = r33Override;
+    if (r20Override > 0.0) v.r20 = r20Override;
     // Q1's gate junctions (to source and drain): they clamp the gate near +0.5 V when the
     // control voltage overshoots at extreme input levels.
+#if UREI1176_FIT_HOOKS
+    const DiodeSpec gateJunction { (gAblation & kAblateGate) ? 1.0e-30 : 1.0e-14, 1.0, 0.0, 1.0e-12 };
+#else
     const DiodeSpec gateJunction { 1.0e-14, 1.0, 0.0, 1.0e-12 };
+#endif
     const BjtSpec npn { 1.0e-14, 300.0, 4.0 };         // BC107 / 2N3391A / 2N3707 class
     // CR3 / CR4 FD333: the control node sits behind up to 5.3M of release network, where a
     // 1N4148's nanoamps of leakage would pull Q1's idle gate down by 25 mV.
@@ -158,7 +202,7 @@ void Circuit1176::build (double sampleRate)
     auto& n = circ.addNetwork ("1176");
     main = &n;
     const int v30 = n.node ("+30V"), vNeg = n.node ("-10V");
-    n.voltageSource (v30, v.supply);        // rev F: CR5 30 V shunt zener behind R84 75R
+    n.voltageSource (v30, v.supply);        // rev F: CR5 30 V shunt zener behind F's R84 75R; G, K: 7824
     n.voltageSource (vNeg, -10.0);          // CR6 10 V zener
     const int vPre = n.node ("pre.B+"), vGr = n.node ("gr.B+");
     n.resistor (v30, vPre, 6.8e3);          // R17
@@ -166,8 +210,9 @@ void Circuit1176::build (double sampleRate)
     n.resistor (v30, vGr, 4.7e3);           // R70
     n.capacitor (vGr, 0, 47e-6);            // C18
 
-    //-- input: 600 ohm source, Input attenuator, T1 -------------------------------------------
-    const int r6In = buildInput (n);
+    //-- input: 600 ohm source, Input attenuator, T1 (rev G and J: the 5532 receiver and the Input pot) ---------
+    DeviceList loop;   // the gain cell, the preamp and the side chain: one Newton group
+    const int r6In = bridgingInput() ? buildInputBridging (n, loop, v.supply, v.c32) : buildInput (n);
 
     //-- gain cell and preamp -------------------------------------------------------------------
     // Q1 shunts the signal after R6 27k. Its source returns through C2 to the middle of Q2's
@@ -188,11 +233,12 @@ void Circuit1176::build (double sampleRate)
     n.resistor (e2, e2m, 180.0);            // R13
     n.resistor (e2m, 0, 180.0);             // R14
     n.resistor (e2, r15, 150.0);            // R15
-    n.resistor (r15, fb, kR16);             // R16 (100 ohm trimmer, factory set)
+    // R16 (100 ohm trimmer, factory set)
+    n.resistor (r15, fb, r16Override > 0.0 ? r16Override : factoryR16 (version));
     n.resistor (fb, out1, v.r21);           // R21
     n.resistor (vPre, c3, 22e3);            // R18
     n.resistor (e3, e3m, 82.0);             // R19
-    n.resistor (e3m, 0, 1.8e3);             // R20
+    n.resistor (e3m, 0, v.r20);             // R20
     n.capacitor (e3m, 0, 100e-6);           // C8
     n.capacitor (out1, pre, v.c9);          // C9
     n.resistor (pre, 0, 100e3);             // R27's track (the pot itself is in "line")
@@ -206,7 +252,6 @@ void Circuit1176::build (double sampleRate)
     n.capacitor (c5, fb, 0.22e-6);          // C5
     n.capacitor (ctl, 0, 0.22e-6);          // C27, the timing capacitor
 
-    DeviceList loop;   // the gain cell, the preamp and the side chain: one Newton group
     {
         auto fet = std::make_unique<JfetDevice> (kQ1, circ.port (n, g), circ.port (n, d), circ.port (n, s));
         gainFet = fet.get();
@@ -452,7 +497,8 @@ const TransformerSpec& Circuit1176::inputTransformer()
 
 const TransformerSpec& Circuit1176::outputTransformer()
 {
-    // B11148 (rev F/G), both primaries and both secondaries in parallel. Sowter's replacement
+    // B11148 (rev F), both primaries and both secondaries in parallel. Rev G rewires the YEL-ORG
+    // winding as an export output (16-11148 with R84 and jumpers). Sowter's replacement
     // (1486) is "50+50 / 150+150 ohm": 1:1.73 per winding pair. No data on the original: the
     // inductance keeps C15's series resonance below the factory response limits, the winding
     // resistances give the ~39 ohm output impedance UREI's test 7 implies; the leakage is
@@ -465,6 +511,20 @@ const TransformerSpec& Circuit1176::outputTransformer()
         4.0, 27.0,      // DCR: 27 + 3 x 4 = 39 ohm output impedance (test 7: 600 ohm load costs 0.55 dB)
         0.0, 0.0, 0.0,
         1.5e3 };        // core loss across the primary, approximation (30 x the 50 ohm winding)
+    return t;
+}
+
+TransformerSpec Circuit1176::outputTransformer (Version v)
+{
+    TransformerSpec t = outputTransformer();
+    // Rev G and J strap (schematic-revisions.md 2.2, 3.2): one primary instead of F's two in parallel, so the primary resistance doubles;
+    // ratio and inductance are F's per winding. Approximation (no winding data exists for 16-11148 or 163-12614).
+    if (v == Version::G || v == Version::J)
+        t.primaryOhms = 2.0 * t.primaryOhms;
+    // Rev J's 163-12614 has one secondary (3-4) as well, not G's two in parallel: its resistance doubles too, the turns ratio and the per-winding
+    // inductance stay (windings of equal turns in parallel have the ratio and inductance of one). Approximation (no winding data exists).
+    if (v == Version::J)
+        t.secondaryOhms = 2.0 * t.secondaryOhms;
     return t;
 }
 
@@ -503,8 +563,19 @@ void Circuit1176::bridgedTArms (Real rotation, Real& bridge, Real& shunt) noexce
     shunt = std::min (kShuntMax, k > 1.0 ? kZ0 / (k - 1.0) : kShuntMax);
 }
 
-Real Circuit1176::gainCellOhms (Real rotation)
+Real Circuit1176::inputPotFraction (Real rotation) noexcept
 {
+    return std::pow (10.0, -inputLossDb (rotation) / 20.0);
+}
+
+Real Circuit1176::gainCellOhms (Real rotation) const
+{
+    if (bridgingInput())
+    {
+        // Rev G and J: R6 plus R5's wiper resistance (IC2-A's output resistance is negligible), times the share across the channel.
+        const Real f = inputPotFraction (rotation);
+        return (27e3 + f * (1.0 - f) * kR5Ohms) * kChannelShare;
+    }
     // R6 plus what T1's secondary presents (R5 270 || the reflected source and pad, plus the
     // windings), times the share of the drain swing across the channel.
     Real bridge, shunt;
@@ -543,8 +614,97 @@ int Circuit1176::buildInput (LinearNetwork& n)
     return sec;
 }
 
+namespace
+{
+/** Op-amp macro-model of rev G's and J's IC2 ("5532"). Approximation, NE5532 data sheet typicals at +-15 V: 100 V/mV, GBW 10 MHz (dominant pole
+    at GBW / A0 = 100 Hz), 300 kohm differential input, 0.3 ohm closed loop at 10 kHz in a gain of 31 (about 10 ohm open loop), +-13 V into
+    2 kohm (2 V of headroom to each supply). Left out: offset, bias current, noise, slew rate, the second pole. The output clamps are two
+    diodes to supply nodes set inside the rails: a soft knee, which matters only above about +22 dBu at the input. */
+struct OpAmpSpec { Real openLoopGain, gbwHz, diffOhms, outOhms, headroomVolts; };
+constexpr OpAmpSpec kNe5532 { 1.0e5, 10.0e6, 300e3, 10.0, 2.0 };
+/** The clamp diodes' drop at about 1 mA, taken off the clamp references so the output stops at the headroom. */
+constexpr Real kClampOnVolts = 0.54;
+
+/** The linear part: Rid, A0 (inP - inM), a 1 k / C pole at GBW / A0, a unity buffer and the output resistance into `out`. */
+void addOpAmp (LinearNetwork& n, const std::string& name, int inP, int inM, int out)
+{
+    const OpAmpSpec& s = kNe5532;
+    const int a = n.node (name + ".a"), b = n.node (name + ".pole"), o = n.node (name + ".o");
+    constexpr Real poleOhms = 1e3, twoPi = 6.283185307179586;
+    n.resistor (inP, inM, s.diffOhms);
+    n.vcvs (a, inP, inM, s.openLoopGain);
+    n.resistor (a, b, poleOhms);
+    n.capacitor (b, 0, 1.0 / (twoPi * poleOhms * (s.gbwHz / s.openLoopGain)));
+    n.vcvs (o, b, 0, 1.0);
+    n.resistor (o, out, s.outOhms);
+}
+} // namespace
+
+int Circuit1176::buildInputBridging (LinearNetwork& n, DeviceList& loop, Real supply, Real c32Farads)
+{
+    // Rev G sheet (leaf 54, schematic-revisions.md 2.1; J's differs only in C32): the 600 ohm generator drives INPUT +, INPUT COM is its
+    // grounded return.
+    //   INPUT+ -> C30 -> R1-D -> IC2-B (R1-C) -> R1-B -> R2 -> IC2-A (R1-A || C32) -> C33 -> R5 -> R6;  COM -> C31 -> R1-E -> R2.
+    // IC2's non-inverting inputs sit at Vb = +30 V R4 / (R3 + R4).
+    const int gen = n.node ("gen"), in = n.node ("in"), v30 = n.node ("+30V");
+    circ.setInput (n, n.voltageSource (gen, 0.0));
+    n.resistor (gen, in, kSourceOhms);
+    n.capacitor (in, 0, 100e-12);                                       // the RF capacitor INPUT + to GRD (Legible, 100 pF)
+
+    const int vb = n.node ("ic2.vb");
+    n.resistor (v30, vb, 100e3);                                        // R3
+    n.resistor (vb, 0, 100e3);                                          // R4
+    n.capacitor (vb, 0, 47e-6);                                         // C34 (C35 on the ideal +30 V has no effect)
+
+    const int c30o = n.node ("c30.r1d"), bInv = n.node ("ic2b.inv"), bOut = n.node ("ic2b.out");
+    n.capacitor (in, c30o, 10e-6);                                      // C30 10 uF (Legible; the polarity marks are Ambiguous)
+    n.resistor (c30o, bInv, 10e3);                                      // R1-D
+    n.resistor (bOut, bInv, 10e3);                                      // R1-C
+    addOpAmp (n, "ic2b", vb, bInv, bOut);                               // IC2-B
+
+    const int r2Top = n.node ("r2.top"), r2Bot = n.node ("r2.bot"), aInv = n.node ("ic2a.inv"), c31o = n.node ("c31.r1e"), aOut = n.node ("ic2a.out");
+    n.resistor (bOut, r2Top, 10e3);                                     // R1-B
+    n.capacitor (0, c31o, 10e-6);                                       // C31 10 uF: INPUT COM (ground) to R1-E
+    n.resistor (c31o, r2Bot, 10e3);                                     // R1-E
+    // R2 500 ohm "CMR ADJ.", wiper centred (Approximation: a factory null that moves only the common-mode rejection)
+    n.resistor (r2Top, aInv, 250.0);
+    n.resistor (aInv, r2Bot, 250.0);
+    n.resistor (aOut, aInv, 10e3);                                      // R1-A
+    n.capacitor (aOut, aInv, c32Farads);                                // C32 (G: 100 pF; H through J: 220 pF)
+    addOpAmp (n, "ic2a", vb, aInv, aOut);                               // IC2-A
+
+    // Output clamps: 2 V of headroom to the rails (see OpAmpSpec).
+    const DiodeSpec clamp { 1.0e-12, 1.0, 0.0, 1.0e-12 };
+    const int hi = n.node ("ic2.clip.hi"), lo = n.node ("ic2.clip.lo");
+#if UREI1176_FIT_HOOKS
+    const Real headroom = (gAblation & kAblateIc2) ? -50.0 : kNe5532.headroomVolts;   // ablation: clamps far outside the rails
+#else
+    const Real headroom = kNe5532.headroomVolts;
+#endif
+    n.voltageSource (hi, supply - headroom - kClampOnVolts);
+    n.voltageSource (lo, headroom + kClampOnVolts);
+    for (const int out : { bOut, aOut })
+    {
+        loop.push_back (std::make_unique<DiodePairDevice> (clamp, DiodeSpec::none(), circ.port (n, out), circ.port (n, hi)));
+        loop.push_back (std::make_unique<DiodePairDevice> (clamp, DiodeSpec::none(), circ.port (n, lo), circ.port (n, out)));
+    }
+
+    // C33 10 uF into R5 (10 k Input pot, lower end grounded); the wiper feeds R6.
+    const int potTop = n.node ("c33.r5"), wiper = n.node ("r5.wiper");
+    n.capacitor (aOut, potTop, 10e-6);                                  // C33
+    // R5: linear in the model, the law is applied in applyInput()
+    inputPot = n.potentiometer (potTop, wiper, 0, kR5Ohms, Taper::linear, inputPotFraction (Range::inputDefault));
+    return wiper;
+}
+
 void Circuit1176::applyInput (Real rotation)
 {
+    if (bridgingInput())
+    {
+        main->setPot (inputPot, inputPotFraction (rotation));   // the pot is linear in the model; the law is applied here
+        seriesOhms = gainCellOhms (rotation);
+        return;
+    }
     Real bridge, shunt;
     bridgedTArms (rotation, bridge, shunt);
     // potentiometer (a, w, b): a-w is (1 - position) of the track.
@@ -556,12 +716,22 @@ void Circuit1176::applyInput (Real rotation)
 
 int Circuit1176::buildOutput (LinearNetwork& l, int lineOut)
 {
-    // C15 into T2's paralleled primaries (rev F: B11148, nothing across the secondary), the
-    // secondary into the bridging load.
+    // C15 into T2 (rev F: B11148, paralleled primaries, nothing across the secondary; rev G: 16-11148, one primary; rev J: 163-12614,
+    // one primary and one secondary; G and J, the revisions with the bridging input, have R84 1 k across the secondary), the secondary
+    // into the bridging load.
     const int c15 = l.node ("c15"), sec = l.node ("t2.sec");
+#if UREI1176_FIT_HOOKS
+    const Version t2Version = (gAblation & kAblateT2) ? Version::F : version;   // ablation: T2 strapped as F
+    const bool withR84 = bridgingInput() && ! (gAblation & kAblateR84);
+#else
+    const Version t2Version = version;
+    const bool withR84 = bridgingInput();
+#endif
     l.capacitor (lineOut, c15, 470e-6);     // C15
-    transformer (l, "t2", outputTransformer(), c15, 0, sec, 0);
+    transformer (l, "t2", outputTransformer (t2Version), c15, 0, sec, 0);
     l.resistor (sec, 0, kLoadOhms);
+    if (withR84)
+        l.resistor (sec, 0, kR84Ohms);      // G and J: R84 across X-Y
     return sec;
 }
 
@@ -617,8 +787,11 @@ float rotationForMarking (float marking) noexcept
 Channel::Channel() : model (std::make_unique<Circuit1176>()) {}
 Channel::~Channel() = default;
 
-void Channel::prepare (double sampleRate)
+void Channel::prepare (double sampleRate) { prepare (sampleRate, model->getVersion()); }
+
+void Channel::prepare (double sampleRate, Version v)
 {
+    model->setVersion (v);
     fs = sampleRate;
     calCurrent = ctl.calibrationDbu;
     updateScale();
@@ -716,12 +889,18 @@ void Channel::updateScale() noexcept
     // generator is, into a matched load: its EMF is twice the level it delivers to 600 ohms. The
     // output is the voltage across the load on T2's secondary.
     unitVolts = dbuToVolts (calCurrent) * std::sqrt (2.0);
-    inGain = 2.0 * unitVolts;
-    outGain = 1.0 / unitVolts;
+    // The version's level trims (Versions.h): ahead of the circuit and after it, and out of the +4 / +8 meter's reference, as the fast engine.
+    const VersionSpec& spec = specFor (model->getVersion());
+    const double inTrim = trimsOn ? std::pow (10.0, spec.inputTrimDb / 20.0) : 1.0, outTrim = trimsOn ? std::pow (10.0, spec.outputTrimDb / 20.0) : 1.0;
+    inGain = 2.0 * unitVolts * inTrim;
+    outGain = 1.0 / unitVolts * outTrim;
     // The VU movement (3.9k with its rectifier) across T2's secondary through R51 3.6k (+4: the
     // standard 0 VU = 1.228 V) or R50 8.2k (+8: 12.1k / 7.5k, 4.16 dB less sensitive).
-    const double ref = ctl.meter == MeterMode::plus8 ? 4.0 + 20.0 * std::log10 ((3.9e3 + 8.2e3) / (3.9e3 + 3.6e3)) : 4.0;
-    vuReference = kSineAverageOverRms * dbuToVolts (ref);
+    // R59: 3.9 k on rev F, 3.6 k on rev G (schematic-revisions.md 2.1) and J, the revisions with the bridging input: +8 reads
+    // 8.16 dBu, G and J 8.29 dBu.
+    const double r59 = Circuit1176::hasBridgingInput (model->getVersion()) ? 3.6e3 : 3.9e3;
+    const double ref = ctl.meter == MeterMode::plus8 ? 4.0 + 20.0 * std::log10 ((r59 + 8.2e3) / (r59 + 3.6e3)) : 4.0;
+    vuReference = kSineAverageOverRms * dbuToVolts (ref) / outTrim;
 }
 
 void Channel::controlTick() noexcept

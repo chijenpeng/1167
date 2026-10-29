@@ -14,11 +14,12 @@
 // control voltage, as the circuit engine closes it.
 //
 // Blocks:
-//   input    600 ohm source, bridged-T pad, T1, R5: linear, rebuilt when Input moves
+//   input    600 ohm source, bridged-T pad, T1, R5: linear, rebuilt when Input moves. Rev G and J: the 5532 receiver (IC2, C30-C33, R1-R2), with IC2's two output
+//            clamps solved inside the sample when they conduct, then C33 into the Input pot R5
 //   cell     R6, Q1, the Q2-Q4 preamp as its small-signal circuit, the gate network (R7 / R9 / C3 / C4 / C5)
 //   side     ratio ladder + GR amp (one block per ratio, small signal plus the Q12 / Q14 junction solve; loaded by what C19 and C20 draw),
 //            CR3 / CR4, attack, release, the threshold reference (ratio section A), the bias
-//   line     Output pot, line amp (small signal), its rails, C15, T2, load
+//   line     Output pot, line amp (small signal), its rails, C15, T2 (strapped per revision; G and J: with R84 across its secondary), load
 //   meters   the same laws as the circuit engine
 // Large-signal behaviour beyond what the linearised blocks give (the preamp's and line amp's rails and
 // the slide of their operating points, Q1's gate junctions) is approximated by fitted static limits.
@@ -56,36 +57,21 @@ constexpr double kBetaF = 300.0;
     outputs e13, e15 and the base-emitter deviations of Q12 and Q14. */
 constexpr int kGrU = 5, kGrO = 4;
 
-//== component values (rev F, as Urei1176.cpp) ====================================================
+//== component values shared by every version (rev F, as Urei1176.cpp; the ones that differ are in VersionSpec) ========
 constexpr double kR6 = 27e3;
 /** Q1 as Urei1176.cpp: UREI's selected 2N5457. */
 constexpr double kQ1Beta = 1.2e-3, kQ1Vp = -1.5, kQ1Lambda = 0.01, kSoftKnee = 0.03;
 constexpr double kChannelShare = 0.48;
-
-/** DC operating currents (emitter currents, amps) of the small-signal transistors, from the
-    reference circuit's operating point (Urei1176.cpp's netlist solved for DC, ratio 4:1 idle). */
-constexpr double kIeQ2 = 2.166262e-05, kIeQ3 = 6.319734e-04, kIeQ4 = 1.482238e-03;
-constexpr double kIeQ12 = 2.392212e-04, kIeQ13 = 5.398527e-03, kIeQ14 = 2.156952e-04, kIeQ15 = 6.624131e-03;
-
-/** Line amp DC currents (collector, amps) from the reference operating point. */
-constexpr double kIcQ5 = 2.913120e-05, kIcQ6 = 1.558209e-04, kIcQ7 = 6.073487e-03, kIcQ8 = 1.866136e-02, kIcQ9 = 1.552901e-02, kIdBias = 6.042694e-03;
 
 constexpr double collectorCurrent (double ie) { return ie * kBetaF / (1.0 + kBetaF); }
 
 //== overload: the parts of the reference's behaviour that its small-signal blocks cannot give ====
 // Everything below sits outside the linear blocks, which are exact (small signal) around the idle operating point. Each is a
 // static limit with a soft knee, or the slide of an operating point with overdrive, fitted to the circuit engine's waveforms
-// (docs/research/urei-1176.md, "The fast engine").
+// (docs/research/urei-1176.md, "The fast engine"). The fitted constants are per version (VersionSpec::overload); Q1's gate junctions
+// are the same in every version:
 /** Q1's gate junctions (to source and drain) hold vgs near +0.4 V: the largest reductions stop there (the reference's gate peaks at +0.6 V). */
 constexpr double kGateMax = 0.40, kGateKnee = 0.20;
-/** The preamp's output stage (Q4's emitter, deviation from its idle 10.89 V) between Q3's saturation and the supply, with its knee, and the
-    slide of its operating point once overdriven (0.92 V per volt of peak above 12.25 V, followed over 0.285 s). Refitted (Nelder-Mead on the
-    output level and H2 / H3 / H5 of 502 reference tones: 100 Hz / 1 kHz / 5 kHz, Input full and 0.75, Output 1 / 0.75 / 0.5, ratios None, 4:1
-    and All, 0 to +26 dBu, with the burst onsets; docs/research/urei-1176.md, "The overload fit"). */
-constexpr double kO1Lo = -9.889, kO1Hi = 12.454, kO1Knee = 0.05, kO1ShiftPerVolt = 0.923, kO1ShiftStart = 12.249, kO1EnvSeconds = 0.285;
-/** The line amp's output stage about its 15.53 V rest point: the rails (0.00 and 28.1 V), their knees, and the
-    slide of the operating point with overdrive (0.425 V per volt of peak above 13.78 V, followed over 55 ms), from the same fit. */
-constexpr double kLineLo = -15.526, kLineHi = 12.557, kLineKneeHi = 0.627, kLineKneeLo = 1.195, kLineShiftPerVolt = 0.425, kLineShiftStart = 13.78, kLineEnvSeconds = 0.0548;
 
 /** The Q1 reduction law's conductance: d id / d vds at vds = 0. */
 inline double q1Conductance (double vgs) noexcept
@@ -233,17 +219,38 @@ struct FastChannel::Impl
     int ratioT = 0, ratioC = 0;
     bool offT = false, offC = false;
     int countdown = 0;
+
+    // --- the detector's high-pass (a plug-in addition: the reference circuit has none) -------------------------------------
+    // The GR amp sees hp = preIn - g * lp, lp being a one-pole low-pass of preIn (lp' = lp + k (preIn - lp), k = 1 - exp (-2 pi fc / fs)),
+    // so hp = hpF * preIn + hpC with the feedthrough hpF = 1 - g k and the history term hpC = -g (1 - k) lp, both known before the sample
+    // is solved. g (0 = off, 1 = on) and k glide linearly over ~10 ms when the choice changes; lp keeps running while off. With g = 0
+    // hpF is exactly 1 and hpC exactly -0, so off is bit-identical to a unit without the filter.
+    int hpIdxT = 0, hpIdxC = 0;
+    double hpG = 0.0, hpK = 0.0, hpGT = 0.0, hpKT = 0.0, hpDG = 0.0, hpDK = 0.0, hpLp = 0.0, hpF = 1.0, hpC = -0.0;
+    int hpLeft = 0;
     double fs = 0.0, T = 0.0;
     bool prepared = false;
+    /** The version this engine is built as, and the GR amp's Q12 / Q14 collector currents IF0 / IF1 (read by the hot solve). */
+    const VersionSpec* spec = &specFor (Version::F);
+    double if0 = collectorCurrent (specFor (Version::F).ieQ12), if1 = collectorCurrent (specFor (Version::F).ieQ14);
 
     // --- levels --------------------------------------------------------------------------------
     double unitVolts = 1.0, inGain = 1.0, outGain = 1.0, vuReference = 1.0;
+    bool trimsOn = true;   // the version's level trims (Versions.h), applied in updateScale(); setVersionTrims (false) takes them off
 
     // --- the shared scratch network for builds ---------------------------------------------------
     TrapNet net;
 
     // --- input block ---------------------------------------------------------------------------
     Lti<4, 1, 1> inputBlk;
+    // rev G's and J's bridging input in place of inputBlk: the receiver (IC2 and its network, with IC2's two output clamps), then C33 into the Input pot
+    // R5 (its open-circuit wiper voltage; rTh below is the pot's source resistance)
+    bool bridging = false;
+    Lti<6, 3, 2> inputRx;   // inputs: the EMF and the clamp currents of IC2-B's and IC2-A's outputs; outputs: those two output voltages
+    Lti<1, 1, 1> inputPot;
+    double clampH = 0.0, clampSafe = 0.0, clampIs = 0.0;   // the clamps' AC threshold, the output level below which they carry nothing, Is
+    /** clampSafe is clampH less this: 0.5 V inside the threshold the diodes carry e^-19 of Is, nothing, so the clamps are skipped. */
+    static constexpr double kClampQuietVolts = 0.5;
     double rTh = 145.0;
     double seriesOhms = 0.0, calibrationOhms = 0.0;
 
@@ -312,9 +319,26 @@ struct FastChannel::Impl
     Lti<5, 1, 1> lineA;
     Lti<3, 1, 1> lineB;
     double lineEnv = 0.0, lineEnvRelease = 0.0;   // peak follower of the line amp's linear output
-    // the overload parameters above, as members so that the fitting tools can move them
+    // the overload parameters, as members: prepare() loads them from the version's spec (the fitting tools can move them)
     double gateMax = kGateMax, gateKnee = kGateKnee;
-    double o1Lo = kO1Lo, o1Hi = kO1Hi, o1Knee = kO1Knee, o1ShiftPerVolt = kO1ShiftPerVolt, o1ShiftStart = kO1ShiftStart, o1EnvRelease = 0.0, o1Env = 0.0;
+    double o1Lo = 0.0, o1Hi = 0.0, o1Knee = 0.0, o1KneeLo = 0.0, o1ShiftPerVolt = 0.0, o1ShiftStart = 0.0, o1EnvSeconds = 1.0, o1EnvRelease = 0.0, o1Env = 0.0;
+    double lineLo = 0.0, lineHi = 0.0, lineKneeHi = 0.0, lineKneeLo = 0.0;
+    double lineShiftPerVolt = 0.0, lineShiftStart = 0.0, lineEnvSeconds = 1.0;
+#if UREI1176_FIT_HOOKS
+    bool overloadOverridden = false;   // setOverloadParams() was called: prepare() keeps those values
+#endif
+
+    /** Loads the 14 overload constants from the spec (unless a fitting tool set its own). */
+    void loadOverload (const OverloadParams& p) noexcept
+    {
+#if UREI1176_FIT_HOOKS
+        if (overloadOverridden) return;
+#endif
+        o1Lo = p.o1Lo; o1Hi = p.o1Hi; o1Knee = p.o1KneeHi; o1KneeLo = p.o1KneeLo;
+        o1ShiftPerVolt = p.o1ShiftPerVolt; o1ShiftStart = p.o1ShiftStart; o1EnvSeconds = p.o1EnvSeconds;
+        lineLo = p.lineLo; lineHi = p.lineHi; lineKneeHi = p.lineKneeHi; lineKneeLo = p.lineKneeLo;
+        lineShiftPerVolt = p.lineShiftPerVolt; lineShiftStart = p.lineShiftStart; lineEnvSeconds = p.lineEnvSeconds;
+    }
 
     // ==============================================================================================
     static constexpr double kIs = 2.5e-9, kPsi = 1.8 * kVt, kLeak = 1.0e-10;
@@ -430,6 +454,80 @@ struct FastChannel::Impl
 
     void buildInput()
     {
+        if (bridging) buildPot();   // the receiver ahead of it (G and J) is built once, in prepare()
+        else buildInputBridgedT();
+    }
+
+    /** The 5532 macro-model of the reference (Circuit1176::addOpAmp), its non-inverting input on the bias node, an AC ground: Rid, a VCVS of
+        the open-loop gain into a 1 k / C pole at GBW / A0, a unity buffer and the output resistance. The caller allocates the internal nodes
+        a, p and o, so that the receiver keeps its node order. */
+    void addOpAmp (const BridgingInput& b, int inv, int a, int p, int o, int out) noexcept
+    {
+        static constexpr double twoPi = 6.283185307179586;
+        net.resistor (0, inv, b.opAmpDiffOhms);
+        net.vcvs (a, 0, inv, b.opAmpGain);
+        net.resistor (a, p, b.opAmpPoleOhms);
+        net.capacitor (p, 0, 1.0 / (twoPi * b.opAmpPoleOhms * (b.opAmpGbwHz / b.opAmpGain)));
+        net.vcvs (o, p, 0, 1.0);
+        net.resistor (o, out, b.opAmpOutOhms);
+    }
+
+    /** Rev G's and J's receiver: the reference's IC2-B and IC2-A stages (Circuit1176::buildInputBridging) with the bias node as an AC ground. The EMF
+        and the two output clamps' currents go in, the two op-amp output voltages come out (the clamps are solved per sample in
+        inputStepBridging; C33 and R5 follow in buildPot). Depends only on the spec and T: prepare() builds it. */
+    void buildReceiver()
+    {
+        const auto& b = spec->bridging;
+        net.clear();
+        const int gen = net.node(), in = net.node(), c30o = net.node(), bInv = net.node(), bA = net.node(), bP = net.node(), bO = net.node(), bOut = net.node();
+        const int r2Top = net.node(), aInv = net.node(), c31o = net.node(), r2Bot = net.node(), aA = net.node(), aP = net.node(), aO = net.node(), aOut = net.node();
+        net.source (gen);
+        net.inject (bOut, 0);                                 // the output clamps' currents (solved per sample, see inputStepBridging)
+        net.inject (aOut, 0);
+        net.resistor (gen, in, Circuit1176::kSourceOhms);
+        net.capacitor (in, 0, b.rfFarads);
+        net.capacitor (in, c30o, b.c30Farads);                // C30
+        net.resistor (c30o, bInv, b.r1Ohms);                  // R1-D
+        net.resistor (bOut, bInv, b.r1Ohms);                  // R1-C
+        addOpAmp (b, bInv, bA, bP, bO, bOut);                 // IC2-B
+        net.resistor (bOut, r2Top, b.r1Ohms);                 // R1-B
+        net.capacitor (0, c31o, b.c31Farads);                 // C31: INPUT COM (ground) to R1-E
+        net.resistor (c31o, r2Bot, b.r1Ohms);                 // R1-E
+        net.resistor (r2Top, aInv, 0.5 * b.r2Ohms);           // R2, wiper centred
+        net.resistor (aInv, r2Bot, 0.5 * b.r2Ohms);
+        net.resistor (aOut, aInv, b.r1Ohms);                  // R1-A
+        net.capacitor (aOut, aInv, b.c32Farads);              // C32
+        addOpAmp (b, aInv, aA, aP, aO, aOut);                 // IC2-A
+        net.outVoltage (bOut);
+        net.outVoltage (aOut);
+        net.build (T);
+        inputRx.loadChecked (net);
+        // The clamps hang from each output to a node `headroom + on` inside the rails, which sit at the bias, half the supply: in AC terms +-clampH.
+        clampH = 0.5 * spec->supplyVolts - b.clampHeadroomVolts - b.clampOnVolts;
+        clampSafe = clampH - kClampQuietVolts;
+        clampIs = b.clampIs;
+    }
+
+    /** C33 into R5 and the wiper at the Input position: the open-circuit wiper voltage, and the pot's source resistance for R6. */
+    void buildPot()
+    {
+        const auto& b = spec->bridging;
+        const double f = Circuit1176::inputPotFraction (Circuit1176::inputPosition (posInputC));   // wiper to ground is f of the track
+        net.clear();
+        const int src = net.node(), top = net.node(), wiper = net.node();
+        net.source (src);
+        net.capacitor (src, top, b.c33Farads);                // C33
+        net.resistor (top, wiper, std::max (1.0, b.potOhms * (1.0 - f)));
+        net.resistor (wiper, 0, std::max (1.0, b.potOhms * f));
+        net.outVoltage (wiper);
+        net.build (T);
+        inputPot.loadChecked (net);   // load() leaves the state alone: C33's charge carries through the rebuild
+        rTh = f * (1.0 - f) * b.potOhms;
+        seriesOhms = (kR6 + rTh) * kChannelShare;
+    }
+
+    void buildInputBridgedT()
+    {
         double bridge, shunt;
         Circuit1176::bridgedTArms (Circuit1176::inputPosition (posInputC), bridge, shunt);
         const double r1a = std::max (5.0, bridge), r1b = std::max (1.25, shunt);
@@ -468,8 +566,13 @@ struct FastChannel::Impl
         seriesOhms = (kR6 + rTh) * kChannelShare;
     }
 
-    static double gainCellOhmsAtFull()
+    double gainCellOhmsAtFull() const
     {
+        if (bridging)
+        {
+            const double f = Circuit1176::inputPotFraction (Circuit1176::inputPosition (Range::inputMax));
+            return (kR6 + f * (1.0 - f) * spec->bridging.potOhms) * kChannelShare;
+        }
         double bridge, shunt;
         Circuit1176::bridgedTArms (Circuit1176::inputPosition (Range::inputMax), bridge, shunt);
         const double gS = 1.0 / Circuit1176::kSourceOhms, gB = 1.0 / std::max (bridge, 1.0), gA = 1.0 / 620.0, gSh = 1.0 / std::max (shunt, 1.0);
@@ -492,7 +595,7 @@ struct FastChannel::Impl
         net.inject (d, s);                 // 2: Q1 channel current
         net.resistor (src, d, kR6 + rTh);                    // R6 and T1's source resistance
         net.resistor (s, 0, 10e3);                           // R8
-        net.capacitor (s, e2m, 68e-6);                       // C2
+        net.capacitor (s, e2m, spec->c2Farads);              // C2
         net.capacitor (d, c1, 1.0e-6);                       // C1
         net.resistor (c1, b2, 1e3);                          // R10
         net.resistor (b2, e3m, 560e3);                       // R11
@@ -500,15 +603,15 @@ struct FastChannel::Impl
         net.resistor (e2, e2m, 180.0);                       // R13
         net.resistor (e2m, 0, 180.0);                        // R14
         net.resistor (e2, r15, 150.0);                       // R15
-        net.resistor (r15, fb, 33.0);                        // R16
-        net.resistor (fb, o1, 6.8e3);                        // R21
+        net.resistor (r15, fb, spec->r16Ohms);               // R16
+        net.resistor (fb, o1, spec->r21Ohms);                // R21
         net.resistor (c3, 0, 22e3);                          // R18
         net.resistor (e3, e3m, 82.0);                        // R19
-        net.resistor (e3m, 0, 1.8e3);                        // R20
-        net.capacitor (e3m, 0, 100e-6);                      // C8
-        bjt (net, b2, c2, e2, collectorCurrent (kIeQ2));     // Q2
-        bjt (net, c2, c3, e3, collectorCurrent (kIeQ3));     // Q3
-        bjt (net, c3, 0, o1, collectorCurrent (kIeQ4));      // Q4
+        net.resistor (e3m, 0, spec->r20Ohms);                // R20
+        net.capacitor (e3m, 0, spec->c8Farads);               // C8
+        bjt (net, b2, c2, e2, collectorCurrent (spec->ieQ2)); // Q2
+        bjt (net, c2, c3, e3, collectorCurrent (spec->ieQ3)); // Q3
+        bjt (net, c3, 0, o1, collectorCurrent (spec->ieQ4)); // Q4
         net.capacitor (c5, fb, 0.22e-6);                     // C5
         net.resistor (c5, ctlN, 4.4e6);                      // R7 + R9
         net.capacitor (c5, ctlN, 100e-12);                   // C3 and C4 in series
@@ -593,8 +696,8 @@ struct FastChannel::Impl
         net.clear();
         const int o1 = net.node(), pre = net.node();
         net.source (o1);
-        net.capacitor (o1, pre, 1.0e-6);                     // C9
-        net.resistor (pre, 0, 1.0 / (1.0 / 100e3 + 1.0 / ladder));
+        net.capacitor (o1, pre, spec->c9Farads);                // C9
+        net.resistor (pre, 0, 1.0 / (1.0 / spec->outputPotOhms + 1.0 / ladder));
         net.outVoltage (pre);
         net.build (T);
         double keep = outBlk.h[0];
@@ -614,23 +717,23 @@ struct FastChannel::Impl
     void buildLineA()
     {
         const double f = ar::circuit::taperFraction (ar::circuit::Taper::audio, posOutputC);
-        const double rWb = std::max (5.0, 100e3 * f), rAw = std::max (5.0, 100e3 * (1.0 - f));
+        const double rWb = std::max (5.0, spec->outputPotOhms * f), rAw = std::max (5.0, spec->outputPotOhms * (1.0 - f));
         net.clear();
         const int pre = net.node(), ow = net.node(), b5 = net.node(), e5 = net.node(), c13 = net.node(), q5c = net.node(), e6 = net.node(), e7 = net.node();
         const int x = net.node(), cr = net.node(), y = net.node(), z = net.node(), r37 = net.node(), e8 = net.node(), e9 = net.node(), lo = net.node();
         net.source (pre);
         net.resistor (pre, ow, rAw);                 // R27 above the wiper
         net.resistor (ow, 0, rWb);                   // R27 below the wiper
-        net.capacitor (ow, b5, 0.15e-6);             // C10
-        net.resistor (b5, 0, 1.0 / (1.0 / 6.8e6 + 1.0 / 1e6));   // R29 (to the filtered supply) and R30
-        net.resistor (q5c, 0, 68e3);                 // R31
-        net.resistor (e5, 0, 1e3);                   // R32
-        net.resistor (e5, c13, 4.7e3);               // R33
-        net.capacitor (c13, 0, 2.2e-9);              // C13
-        net.resistor (lo, e5, 3.9e3);                // R34
+        net.capacitor (ow, b5, spec->c10Farads);        // C10
+        net.resistor (b5, 0, 1.0 / (1.0 / spec->r29Ohms + 1.0 / spec->r30Ohms));   // R29 (to the filtered supply) and R30
+        net.resistor (q5c, 0, spec->r31Ohms);       // R31
+        net.resistor (e5, 0, spec->r32Ohms);       // R32
+        net.resistor (e5, c13, spec->r33Ohms);     // R33
+        net.capacitor (c13, 0, spec->c13Farads);   // C13
+        net.resistor (lo, e5, spec->r34Ohms);      // R34
         net.resistor (e6, 0, 10e3);                  // R35
         net.resistor (e7, 0, 100.0);                 // R36
-        net.capacitor (q5c, r37, 12e-12);            // C12
+        net.capacitor (q5c, r37, spec->c12Farads); // C12
         net.resistor (r37, y, 1e3);                  // R37
         net.resistor (y, z, 1.2e3);                  // R38
         net.resistor (z, 0, 1.2e3);                  // R39
@@ -638,15 +741,16 @@ struct FastChannel::Impl
         net.capacitor (y, 0, 47e-12);                // C29
         net.resistor (e8, lo, 4.3);                  // R40
         net.resistor (lo, e9, 4.3);                  // R41
-        net.resistor (lo, 0, 1e4 / 3.0);             // T2's load reflected to the primary
-        bjtBeta (net, b5, q5c, e5, kIcQ5, 300.0);    // Q5
-        bjtBeta (net, q5c, x, e6, kIcQ6, 250.0);     // Q6
-        bjtBeta (net, e6, x, e7, kIcQ7, 250.0);      // Q7
-        const double rd = 1.984 * kVt / kIdBias + 0.034;
+        const double t2Load = spec->r84Ohms > 0.0 ? 1.0 / (1.0 / Circuit1176::kLoadOhms + 1.0 / spec->r84Ohms) : Circuit1176::kLoadOhms;
+        net.resistor (lo, 0, t2Load / 3.0);          // T2's load (R84 across it on G) reflected to the primary
+        bjtBeta (net, b5, q5c, e5, spec->icQ5, 300.0);    // Q5
+        bjtBeta (net, q5c, x, e6, spec->icQ6, 250.0);     // Q6
+        bjtBeta (net, e6, x, e7, spec->icQ7, 250.0);      // Q7
+        const double rd = 1.984 * kVt / spec->idBias + 0.034;
         net.resistor (x, cr, rd);                    // CR1
         net.resistor (cr, y, rd);                    // CR2
-        bjtBeta (net, x, 0, e8, kIcQ8, 100.0);       // Q8
-        bjtBeta (net, y, 0, e9, kIcQ9, 100.0);       // Q9
+        bjtBeta (net, x, 0, e8, spec->icQ8, 100.0);       // Q8
+        bjtBeta (net, y, 0, e9, spec->icQ9, 100.0);       // Q9
         net.outVoltage (lo);
         net.build (T);
         double keep[5];
@@ -657,17 +761,18 @@ struct FastChannel::Impl
 
     void buildLineB()
     {
-        const auto& t = Circuit1176::outputTransformer();
+        const TransformerSpec t = Circuit1176::outputTransformer (spec->version);   // T2 as the version straps it (the reference's winding data)
         net.clear();
         const int lo = net.node(), c15 = net.node(), pw = net.node(), sec = net.node(), sw = net.node();
         net.source (lo);
-        net.capacitor (lo, c15, 470e-6);             // C15
+        net.capacitor (lo, c15, spec->c15Farads);      // C15
         net.resistor (c15, pw, t.primaryOhms);
         net.resistor (sec, sw, t.secondaryOhms);
         const double l1 = t.primaryHenries, l2 = l1 * t.turnsRatio * t.turnsRatio;
         net.coupledInductors (pw, 0, sw, 0, l1, l2, t.coupling * std::sqrt (l1 * l2));
         if (t.coreOhms > 0.0) net.resistor (pw, 0, t.coreOhms);
         net.resistor (sec, 0, Circuit1176::kLoadOhms);
+        if (spec->r84Ohms > 0.0) net.resistor (sec, 0, spec->r84Ohms);   // R84 across T2's secondary
         net.outVoltage (sec);
         net.build (T);
         lineB.loadChecked (net);
@@ -723,10 +828,10 @@ struct FastChannel::Impl
             net.resistor (r64, 0, 270.0);        // R65
             net.resistor (e13n, r64, 2.4e3);     // R64
             net.resistor (e12, e15n, 47e3);      // R68
-            net.resistor (e13n, b14, 182e3);     // R66
-            net.resistor (b14, r72, 38.3e3);     // R67
-            net.resistor (c14, 0, 44.2e3);       // R69
-            net.resistor (e14, r72, 7.68e3);     // R71
+            net.resistor (e13n, b14, spec->grR66Ohms); // R66
+            net.resistor (b14, r72, spec->grR67Ohms); // R67
+            net.resistor (c14, 0, spec->grR69Ohms);   // R69
+            net.resistor (e14, r72, spec->grR71Ohms); // R71
             net.resistor (e15n, r72, 2.4e3);     // R72
             net.resistor (r72, 0, 180.0);        // R73
             net.inject (e15n, 0);                // 1: what C19 draws from Q15's emitter
@@ -734,10 +839,10 @@ struct FastChannel::Impl
             // large-signal excess of Q12 and Q14: collector to emitter, and the base share (1 / beta) of it (inputs 3 + 2k, 4 + 2k)
             net.inject (c12, e12);  net.inject (b12, e12);
             net.inject (c14, e14);  net.inject (b14, e14);
-            bjt (net, b12, c12, e12, collectorCurrent (kIeQ12));   // Q12
-            bjt (net, c12, 0, e13n, collectorCurrent (kIeQ13));    // Q13
-            bjt (net, b14, c14, e14, collectorCurrent (kIeQ14));   // Q14
-            bjt (net, c14, 0, e15n, collectorCurrent (kIeQ15));    // Q15
+            bjt (net, b12, c12, e12, collectorCurrent (spec->ieQ12)); // Q12
+            bjt (net, c12, 0, e13n, collectorCurrent (spec->ieQ13)); // Q13
+            bjt (net, b14, c14, e14, collectorCurrent (spec->ieQ14)); // Q14
+            bjt (net, c14, 0, e15n, collectorCurrent (spec->ieQ15)); // Q15
             net.outVoltage (e13n);
             net.outVoltage (e15n);
             net.outVoltage (b12, e12);       // Q12 base-emitter
@@ -881,10 +986,15 @@ struct FastChannel::Impl
     void updateScale()
     {
         unitVolts = dbuToVolts (calCurrent) * std::sqrt (2.0);
-        inGain = 2.0 * unitVolts;
-        outGain = 1.0 / unitVolts;
-        const double refDbu = ctl.meter == MeterMode::plus8 ? 4.0 + 20.0 * std::log10 ((3.9e3 + 8.2e3) / (3.9e3 + 3.6e3)) : 4.0;
-        vuReference = kSineAverageOverRms * dbuToVolts (refDbu);
+        // The version's level trims sit in this calibration layer: ahead of the circuit and after it, and ahead of the +4 / +8 meter's tap, so
+        // that a given plug-in output level reads the same on every version (the make-up is taken out of the meter's reference). Both are
+        // exactly 1 on F, whose products are then bit for bit what they were without them.
+        const double inTrim = trimsOn ? std::pow (10.0, spec->inputTrimDb / 20.0) : 1.0;
+        const double outTrim = trimsOn ? std::pow (10.0, spec->outputTrimDb / 20.0) : 1.0;
+        inGain = 2.0 * unitVolts * inTrim;
+        outGain = 1.0 / unitVolts * outTrim;
+        const double refDbu = ctl.meter == MeterMode::plus8 ? 4.0 + 20.0 * std::log10 ((spec->meterR59Ohms + spec->meterPlus8SeriesOhms) / (spec->meterR59Ohms + spec->meterPlus8ReferenceOhms)) : 4.0;
+        vuReference = kSineAverageOverRms * dbuToVolts (refDbu) / outTrim;
     }
 
     // ==============================================================================================
@@ -951,6 +1061,8 @@ struct FastChannel::Impl
     void clearStates()
     {
         inputBlk.clearState();
+        inputRx.clearState();
+        inputPot.clearState();
         cell.clearState();
         refreshCellOutputs();
         outBlk.clearState();
@@ -977,8 +1089,13 @@ struct FastChannel::Impl
     }
 
     // ==============================================================================================
-    void prepare (double sampleRate)
+    void prepare (double sampleRate, Version version)
     {
+        spec = &specFor (version);
+        bridging = spec->inputBridging;
+        if0 = collectorCurrent (spec->ieQ12);
+        if1 = collectorCurrent (spec->ieQ14);
+        loadOverload (spec->overload);
         fs = sampleRate;
         T = 1.0 / fs;
         calCurrent = ctl.calibrationDbu;
@@ -988,8 +1105,9 @@ struct FastChannel::Impl
         g27 = 2.0 * 0.22e-6 / T;
         avgCoeff = 1.0 - std::exp (-1.0 / (0.05 * fs));
         for (int n = 0; n <= kControlInterval; ++n) avgSeg[n] = 1.0 - std::exp (-(double) n / (0.05 * fs));
-        lineEnvRelease = 1.0 - std::exp (-1.0 / (kLineEnvSeconds * fs));
-        o1EnvRelease = 1.0 - std::exp (-1.0 / (kO1EnvSeconds * fs));
+        lineEnvRelease = 1.0 - std::exp (-1.0 / (lineEnvSeconds * fs));
+        o1EnvRelease = 1.0 - std::exp (-1.0 / (o1EnvSeconds * fs));
+        if (bridging) buildReceiver();
         computeBias();
         buildGr();
         for (auto& gl : grLoad)
@@ -1020,6 +1138,11 @@ struct FastChannel::Impl
         if (! prepared) return;
         posInputC = posInputT; posOutputC = posOutputT; posAttackC = posAttackT; posReleaseC = posReleaseT;
         ratioC = ratioT; offC = offT;
+        hpIdxC = hpIdxT;
+        hpKT = hpKFor (hpIdxC > 0 ? hpIdxC : 3);
+        hpGT = hpIdxC > 0 ? 1.0 : 0.0;
+        hpG = hpGT; hpK = hpKT; hpLeft = 0; hpLp = 0.0;
+        hpF = 1.0 - hpG * hpK; hpC = -hpG * (1.0 - hpK) * hpLp;
         updateScale();
         applyTimes();
         // the meter zero (R55) is set at idle with a 20:1 button in and limiting off
@@ -1047,6 +1170,29 @@ struct FastChannel::Impl
     }
 
     // ==============================================================================================
+    /** The one-pole's coefficient k for the S/C HPF choice (1 = 30 Hz ... 5 = 185 Hz) at the sample rate in use. */
+    double hpKFor (int idx) const noexcept
+    {
+        static constexpr double kCorners[6] = { 0.0, 30.0, 60.0, 105.0, 125.0, 185.0 };
+        return 1.0 - std::exp (-2.0 * 3.14159265358979323846 * kCorners[std::clamp (idx, 1, 5)] / fs);
+    }
+    /** A new choice: off glides g to 0 and keeps the corner; on glides g to 1 (the corner is taken at once while off, and glides
+        from one corner to another). About 10 ms either way. */
+    void hpStart() noexcept
+    {
+        hpIdxC = hpIdxT;
+        if (hpIdxC == 0) { hpGT = 0.0; hpKT = hpK; }
+        else
+        {
+            hpGT = 1.0;
+            hpKT = hpKFor (hpIdxC);
+            if (hpG == 0.0) hpK = hpKT;
+        }
+        hpLeft = std::max (1, (int) std::lround (0.010 * fs));
+        hpDG = (hpGT - hpG) / hpLeft;
+        hpDK = (hpKT - hpK) / hpLeft;
+    }
+
     void controlTick()
     {
         auto glide = [] (float& cur, float want)
@@ -1062,6 +1208,7 @@ struct FastChannel::Impl
         if (a || r) applyTimes();
         if (ratioC != ratioT) { ratioC = ratioT; applyRatio(); buildOutBlock(); }
         offC = offT;
+        if (hpIdxC != hpIdxT) hpStart();
         if (calCurrent != ctl.calibrationDbu)
         {
             const float step = 0.25f, diff = ctl.calibrationDbu - calCurrent;
@@ -1177,7 +1324,7 @@ struct FastChannel::Impl
         L.i = i; L.dg = dg; L.dd = dd; L.dF = dF;
         for (int o = 0; o < 6; ++o) L.y[o] = p[o] + cell.D[o][2] * i;
         // the preamp output stage limits (Q4 follows Q3's collector between its saturation and cut-off), then C9
-        L.o1c = softLimit (L.y[4] - o1ShiftPerVolt * std::max (0.0, o1Env - o1ShiftStart), o1Lo, o1Hi, L.clipSlope, o1Knee);
+        L.o1c = softLimit (L.y[4] - o1ShiftPerVolt * std::max (0.0, o1Env - o1ShiftStart), o1Lo, o1Hi, L.clipSlope, o1Knee, o1KneeLo);
         outBlk.output<1> (&L.o1c, &L.pre);
     }
 
@@ -1207,7 +1354,7 @@ struct FastChannel::Impl
         followers' outputs e13 and e15 (before the load C19 and C20 draw, which enters through the last sample's currents). */
     UREI1176_FORCE_INLINE void solveGr (const Lti<1, kGrU, kGrO>& gr, const double* y, LoopEval& L) noexcept
     {
-        constexpr double IF0 = collectorCurrent (kIeQ12), IF1 = collectorCurrent (kIeQ14);
+        const double IF0 = if0, IF1 = if1;
         const double x0a = y[2] + gr.D[2][1] * i19 + gr.D[2][2] * i20, x0b = y[3] + gr.D[3][1] * i19 + gr.D[3][2] * i20;
         grX0[0] = x0a; grX0[1] = x0b;
         const double k00 = gr.D[2][3], k01 = gr.D[2][4], k10 = gr.D[3][3], k11 = gr.D[3][4];
@@ -1238,7 +1385,7 @@ struct FastChannel::Impl
     /** d e13 / d pre and d e15 / d pre of the Q12 / Q14 solve at the present point (for the loop's Newton step; rare). */
     void grSlopes (const Lti<1, kGrU, kGrO>& gr, const double* G, double& g13, double& g15) const noexcept
     {
-        constexpr double IF0 = collectorCurrent (kIeQ12), IF1 = collectorCurrent (kIeQ14);
+        const double IF0 = if0, IF1 = if1;
         const double k00 = gr.D[2][3], k01 = gr.D[2][4], k10 = gr.D[3][3], k11 = gr.D[3][4];
         double pa, da, pb, db;
         phiOf ((grX0[0] + k00 * G[0] + k01 * G[1]) * (1.0 / kVt), pa, da);
@@ -1262,7 +1409,7 @@ struct FastChannel::Impl
         const bool active = ! offC && ratioC != (int) Ratio::none;
         const auto& gr = grBlk[(size_t) grVariant];
         const auto& gl = grLoad[(size_t) grVariant];
-        const double dpre = outBlk.D[0][0] * L.clipSlope * (cell.D[4][1] + cell.D[4][2] * didx);
+        const double dpre = hpF * outBlk.D[0][0] * L.clipSlope * (cell.D[4][1] + cell.D[4][2] * didx);   // hpF: the S/C HPF's feedthrough
         const double dictl = cell.D[5][1] + cell.D[5][2] * didx;
         double g13 = 0.0, g15 = 0.0;
         if (active) grSlopes (gr, L.G, g13, g15);
@@ -1294,7 +1441,7 @@ struct FastChannel::Impl
     {
         // --- GR amp
         const bool active = ! offC && ratioC != (int) Ratio::none;
-        const double grIn = active ? preIn : 0.0;
+        const double grIn = active ? hpF * preIn + hpC : 0.0;   // the S/C HPF (exactly preIn while it is off)
         const int variant = grVariant;
         const auto& gr = grBlk[(size_t) variant];
         double e[kGrO];
@@ -1391,9 +1538,9 @@ struct FastChannel::Impl
         // clipping gets asymmetric): the signal is moved by 0.4 V per volt that its peak exceeds 14 V before it meets the limits.
         const double a = std::abs (lo);
         lineEnv = a > lineEnv ? a : lineEnv + (a - lineEnv) * lineEnvRelease;
-        const double shift = kLineShiftPerVolt * std::max (0.0, lineEnv - kLineShiftStart);
+        const double shift = lineShiftPerVolt * std::max (0.0, lineEnv - lineShiftStart);
         double slope;
-        lo = softLimit (lo - shift, kLineLo, kLineHi, slope, kLineKneeHi, kLineKneeLo);
+        lo = softLimit (lo - shift, lineLo, lineHi, slope, lineKneeHi, lineKneeLo);
         lineB.output<1> (&lo, &out);
         lineB.advance (&lo);
         return out;
@@ -1415,7 +1562,7 @@ struct FastChannel::Impl
             e13 = L.e13 + gl.Z[1][0] * iC3 + gl.Z[1][1] * iC4;
             vc19 = e15 - va3; i19 = iC3;
             vc20 = e13 - va4; i20 = iC4;
-            const double ug[kGrU] = { active ? preN : 0.0, iC3, iC4, L.G[0], L.G[1] };
+            const double ug[kGrU] = { active ? hpF * preN + hpC : 0.0, iC3, iC4, L.G[0], L.G[1] };
             grBlk[(size_t) grVariant].advance (ug);
         }
         const double refN = (g21 * ref + i21 + refDrive + (va3 + va4) * kInv47k) * refInvDen;
@@ -1427,6 +1574,15 @@ struct FastChannel::Impl
         vz = vzN;
         ctlV = ctlN;
         Iprev = L.I;
+        // the S/C HPF: this sample's low-pass state, the glide, and the feedthrough and history term for the next sample
+        hpLp += hpK * (preN - hpLp);
+        if (hpLeft > 0)
+        {
+            if (--hpLeft == 0) { hpG = hpGT; hpK = hpKT; }
+            else { hpG += hpDG; hpK += hpDK; }
+        }
+        hpF = 1.0 - hpG * hpK;
+        hpC = -hpG * (1.0 - hpK) * hpLp;
     }
 
     /** The input network: the plug-in's level in volts at the 600 ohm source's EMF, T1's secondary open-circuit volts out. */
@@ -1459,6 +1615,71 @@ struct FastChannel::Impl
         inputBlk.output<1> (&emf, &voc);
         inputBlk.advance (&emf);
         return voc;
+    }
+    /** One clamp's current at output voltage v (AC, re the bias): the top diode to +H and the bottom to -H, Is (limitedExp (x) - 1), x = (v -+ H) / Vt. */
+    static inline void clampCurrent (double v, double H, double Is, double& i, double& di) noexcept
+    {
+        static constexpr double xMax = 40.0;   // limitedExp's knee, as the reference's diode device
+        auto limitedExp = [] (double x, double& d)
+        {
+            const double e = std::exp (std::min (x, xMax));
+            d = e;
+            return x > xMax ? e * (1.0 + (x - xMax)) : e;
+        };
+        double dt, db;
+        const double et = limitedExp ((v - H) / kVt, dt), eb = limitedExp ((-H - v) / kVt, db);
+        i = Is * (et - eb);
+        di = Is * (dt + db) / kVt;
+    }
+
+    /** v = c - R i (v) for one clamped output, by Newton from the right side of the root (the function is convex and increasing there, so the iteration
+        descends monotonically); the lower clamp is the mirror image. Returns i (v). */
+    static inline double solveClamp (double c, double R, double H, double Is) noexcept
+    {
+        const double sign = c < 0.0 ? -1.0 : 1.0;
+        const double cc = std::abs (c);
+        if (cc <= H - kClampQuietVolts) return 0.0;
+        // start right of the root: at cc, or 1.1 V past H, just beyond limitedExp's knee (40 Vt = 1.03 V), where R i already exceeds any level
+        double v = std::min (cc, H + 1.1), i = 0.0, di = 0.0;
+        for (int it = 0; it < 60; ++it)
+        {
+            clampCurrent (v, H, Is, i, di);
+            const double g = v - cc + R * i, step = g / (1.0 + R * di);
+            v -= step;
+            if (std::abs (step) < 1.0e-12) break;
+        }
+        clampCurrent (v, H, Is, i, di);
+        return sign * i;
+    }
+
+    /** Rev G and J: the receiver with IC2's output clamps, then C33 and the pot. Between the clamps' thresholds the receiver is the linear block; past
+        them the two clamp currents are solved inside the sample (the K method: each output is its linear prediction less the block's own
+        feedthrough times the clamp's current), as the reference's Newton group does, and fed back into the block's states, so the op-amp
+        macro-models' internal poles wind up as the reference's do. */
+    UREI1176_FORCE_INLINE double inputStepBridging (double emf) noexcept
+    {
+        double y0[2];
+        inputRx.output<1> (&emf, y0);
+        double u[3] = { emf, 0.0, 0.0 };
+        double a = y0[1];
+        if (std::abs (y0[0]) > clampSafe || std::abs (y0[1]) > clampSafe)
+        {
+            // v = y0 + D i: each output is its prediction plus the feedthrough from the two clamp currents (negative: current leaving a node lowers it)
+            const double rB = -inputRx.D[0][1], rA = -inputRx.D[1][2];
+            double iB = 0.0, iA = 0.0;
+            for (int pass = 0; pass < 3; ++pass)
+            {
+                iB = solveClamp (y0[0] + inputRx.D[0][2] * iA, rB, clampH, clampIs);
+                iA = solveClamp (y0[1] + inputRx.D[1][1] * iB, rA, clampH, clampIs);
+            }
+            u[1] = iB; u[2] = iA;
+            a = y0[1] + inputRx.D[1][1] * iB + inputRx.D[1][2] * iA;
+        }
+        inputRx.advance (u);
+        double v;
+        inputPot.output<1> (&a, &v);
+        inputPot.advance (&a);
+        return v;
     }
 
     /** One sample of the compression loop in four stages, so that two channels can be stepped alternately (see FastChannel::processPair):
@@ -1738,7 +1959,7 @@ struct FastChannel::Impl
         const bool active = ! offC && ratioC != (int) Ratio::none;
         const auto& gr = grBlk[(size_t) grVariant];
         const auto& gl = grLoad[(size_t) grVariant];
-        const double dpre = outBlk.D[0][0] * L.clipSlope * (cell.D[4][1] + cell.D[4][2] * didx);
+        const double dpre = hpF * outBlk.D[0][0] * L.clipSlope * (cell.D[4][1] + cell.D[4][2] * didx);   // hpF: the S/C HPF's feedthrough
         dictl = cell.D[5][1] + cell.D[5][2] * didx;
         double g13 = 0.0, g15 = 0.0;
         if (active) grSlopes (gr, L.G, g13, g15);
@@ -1864,11 +2085,98 @@ void FastChannel::setBiasPotDiag (double position) noexcept
         m.solveBias (sel, m.biasPos, m.biasV[sel], m.refVA6[sel], m.refRA6[sel]);
 }
 
-
-void FastChannel::prepare (double sampleRate)
+#if UREI1176_FIT_HOOKS
+OverloadParams FastChannel::shippedOverload (Version v) noexcept
 {
-    impl->prepare (sampleRate);
+    return specFor (v).overload;
+}
+
+BakedConstants FastChannel::bakedConstants (Version v) noexcept
+{
+    const auto& f = specFor (v);
+    return { f.ieQ2, f.ieQ3, f.ieQ4, f.ieQ12, f.ieQ13, f.ieQ14, f.ieQ15, f.icQ5, f.icQ6, f.icQ7, f.icQ8, f.icQ9, f.idBias,
+             collectorCurrent (f.ieQ12), collectorCurrent (f.ieQ14) };
+}
+
+void FastChannel::setOverloadParams (const OverloadParams& p) noexcept
+{
+    auto& m = *impl;
+    m.o1Lo = p.o1Lo; m.o1Hi = p.o1Hi; m.o1Knee = p.o1KneeHi; m.o1KneeLo = p.o1KneeLo;
+    m.o1ShiftPerVolt = p.o1ShiftPerVolt; m.o1ShiftStart = p.o1ShiftStart; m.o1EnvSeconds = p.o1EnvSeconds;
+    m.lineLo = p.lineLo; m.lineHi = p.lineHi; m.lineKneeHi = p.lineKneeHi; m.lineKneeLo = p.lineKneeLo;
+    m.lineShiftPerVolt = p.lineShiftPerVolt; m.lineShiftStart = p.lineShiftStart; m.lineEnvSeconds = p.lineEnvSeconds;
+    m.overloadOverridden = true;
+    if (m.prepared)
+    {
+        m.lineEnvRelease = 1.0 - std::exp (-1.0 / (m.lineEnvSeconds * m.fs));
+        m.o1EnvRelease = 1.0 - std::exp (-1.0 / (m.o1EnvSeconds * m.fs));
+    }
+}
+#endif
+
+
+Version FastChannel::version() const noexcept { return impl->spec->version; }
+
+void FastChannel::prepare (double sampleRate, Version version)
+{
+    impl->prepare (sampleRate, version);
     needleDb.store ((float) std::clamp (20.0 * std::log10 (std::max (impl->needle, 1e-6)), (double) Range::meterMinDb, (double) Range::meterMaxDb), std::memory_order_relaxed);
+}
+
+void FastChannel::adoptControlState (const FastChannel& from) noexcept
+{
+    auto& m = *impl;
+    const auto& f = *from.impl;
+    if (! m.prepared || ! f.prepared || &m == &f)
+        return;
+
+    // The control voltage: a linked source's gate sees ctlV + ctlOffset, so the effective voltage is taken (this engine is not tied yet;
+    // runPair engages the tie from here).
+    const double ctlEff = f.ctlV + f.ctlOffset;
+    m.ctlV = ctlEff;
+    m.ctlOffset = 0.0;
+    m.linked = false;
+    m.i27 = f.i27;
+    m.vz = f.vz; m.i22 = f.i22;                 // C22 and the attack path
+    m.ref = f.ref; m.i21 = f.i21;               // the threshold reference
+    m.Iprev = f.Iprev; m.vk = ctlEff;           // the rectifier's last current (the next sample's first guess)
+
+    // The GR amp and its coupling: C19 / C20 hold the peak-detector's DC (a 0.3 s memory), with their anodes and history currents;
+    // C17 carries its charge in whichever ratio block is running.
+    m.va3 = f.va3; m.va4 = f.va4; m.vc19 = f.vc19; m.vc20 = f.vc20; m.i19 = f.i19; m.i20 = f.i20;
+    m.e13 = f.e13; m.e15 = f.e15;
+    m.grGWarm[0] = f.grGWarm[0]; m.grGWarm[1] = f.grGWarm[1];
+    for (size_t v = 0; v < m.grBlk.size(); ++v) m.grBlk[v].h[0] = f.grBlk[v].h[0];
+
+    // The S/C HPF's low-pass (the filter's own glide state follows the controls, which the processor pushes to both).
+    m.hpLp = f.hpLp;
+    m.hpC = -m.hpG * (1.0 - m.hpK) * m.hpLp;
+
+    // The cell's state (Q1's plant: C1, C2, C5, C8 and the rest). Not the DC steady state at this control voltage (settleCell): with a
+    // signal running, the capacitors hold the rectified shift of the signal as well, and starting from the idle solution leaves the
+    // control voltage drifting by tens of millivolts over the next 20 ms (measured: 1.1 dB of level at 12 dB of reduction). The state is
+    // recovered as buildCell does, h = C^-1 q, from the source's own outputs-as-state; the target's blocks are the same circuit.
+    for (int i = 0; i < 6; ++i)
+    {
+        double sum = 0.0;
+        for (int j = 0; j < 6; ++j) sum += f.cellCinv[i][j] * f.cellY0[j];
+        m.cell.h[i] = sum;
+    }
+    m.refreshCellOutputs();
+
+    // The gate-drive meter's state (the 50 ms averages and the last values) and the overload followers.
+    m.fbAvg = f.fbAvg; m.srcAvg = f.srcAvg; m.fbLast = f.fbLast; m.srcLast = f.srcLast;
+    m.vgsControl = f.vgsControl; m.vgsPeak = f.vgsControl;
+    m.rawBase = f.rawBase; m.rawLast = f.rawLast; m.rawPeak = -1.0e9; m.driveSum = 0.0;
+    m.lineEnv = f.lineEnv; m.o1Env = f.o1Env;
+
+    // The VU needle and the published meters, so that a meter does not jump at the hand-off; and the control tick, so that the
+    // two engines of a pair stay in step.
+    m.needle = f.needle; m.needleSpeed = f.needleSpeed;
+    m.countdown = f.countdown;
+    needleDb.store (from.needleDb.load (std::memory_order_relaxed), std::memory_order_relaxed);
+    blockGrDb.store (from.blockGrDb.load (std::memory_order_relaxed), std::memory_order_relaxed);
+    grNow.store (from.grNow.load (std::memory_order_relaxed), std::memory_order_relaxed);
 }
 
 void FastChannel::reset()
@@ -1902,6 +2210,16 @@ void FastChannel::setRelease (float dial) noexcept
 }
 void FastChannel::setLimitOff (bool off) noexcept { impl->ctl.limitOff = off; impl->offT = off; }
 void FastChannel::setRatio (Ratio ratio) noexcept { impl->ctl.ratio = ratio; impl->ratioT = (int) ratio; }
+void FastChannel::setSidechainFilter (int choice) noexcept
+{
+    impl->ctl.sidechainFilter = std::clamp (choice, 0, 5);
+    impl->hpIdxT = impl->ctl.sidechainFilter;
+}
+void FastChannel::setVersionTrims (bool on) noexcept
+{
+    impl->trimsOn = on;
+    impl->updateScale();
+}
 void FastChannel::setMeterMode (MeterMode mode) noexcept { impl->ctl.meter = mode; impl->updateScale(); }
 void FastChannel::setCalibrationDbu (float dbu) noexcept
 {
@@ -1917,6 +2235,12 @@ struct FastChannel::Impl::Segment
 
 void FastChannel::Impl::inputPass (const float* seg, int count, Segment& sg) noexcept
 {
+    if (bridging)   // fixed between prepare() calls: one test per segment
+    {
+        for (int k = 0; k < count; ++k)
+            sg.voc[k] = inputStepBridging ((double) seg[k] * inGain);
+        return;
+    }
     for (int k = 0; k < count; ++k)
         sg.voc[k] = inputStep ((double) seg[k] * inGain);
 }
